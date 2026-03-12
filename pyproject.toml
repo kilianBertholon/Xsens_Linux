@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xdot-manager"
+version = "0.1.0"
+description = "Gestionnaire multi-adaptateur BLE pour 16 capteurs Xsens DOT simultanés"
+requires-python = ">=3.11"
+dependencies = [
+    "bleak>=0.22.0",
+    "rich>=13.0.0",
+    "PyQt6>=6.6.0",
+    "qasync>=0.27.0",
+]
+
+[project.scripts]
+xdot     = "xdot_manager.main:main"
+xdot-gui = "xdot_manager.gui:run_gui"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["xdot_manager*"]

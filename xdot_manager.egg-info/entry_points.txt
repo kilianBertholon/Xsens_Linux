@@ -1,0 +1,3 @@
+[console_scripts]
+xdot = xdot_manager.main:main
+xdot-gui = xdot_manager.gui:run_gui

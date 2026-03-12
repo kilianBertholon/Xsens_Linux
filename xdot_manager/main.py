@@ -1,0 +1,353 @@
+"""
+Point d'entrée CLI — xdot-manager.
+
+Sous-commandes :
+  adapters          Lister les adaptateurs Bluetooth disponibles
+  scan              Scanner et lister les capteurs Xsens DOT
+  record            Synchroniser + démarrer/arrêter l'enregistrement
+  export            Exporter la mémoire flash vers CSV
+  full              Cycle complet : sync → record → stop → export
+
+Usage examples :
+  xdot adapters
+  xdot scan --timeout 8
+  xdot record --duration 60 --payload euler
+  xdot export --output ./data --payload quaternion
+  xdot full --duration 30 --output ./data --payload euler
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import sys
+from pathlib import Path
+from typing import Optional
+
+from .adapters import list_adapters, print_adapter_summary
+from .scanner import scan_for_dots, print_scan_results, DotDevice
+from .sensor import DotSensor, DotError, DotConnectError
+from .sync import synchronize_sensors, SyncResult
+from .recording import start_all, stop_all, wait_duration
+from .export import export_all_sensors, print_export_summary, PRESET_EULER, PRESET_QUATERNION, PRESET_IMU, PRESET_FULL
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Payloads disponibles
+# ---------------------------------------------------------------------------
+PAYLOAD_MAP = {
+    "euler":      PRESET_EULER,
+    "quaternion": PRESET_QUATERNION,
+    "imu":        PRESET_IMU,
+    "full":       PRESET_FULL,
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _setup_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+        level=level,
+    )
+    # Réduire le bruit des bibliothèques tierces
+    for noisy in ("bleak", "bleak.backends", "dbus_next"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+async def _scan_and_filter(
+    timeout: float,
+    max_per_adapter: int,
+    addresses: Optional[list[str]] = None,
+) -> list[DotDevice]:
+    """Lance le scan et filtre optionnellement par adresses."""
+    adapters = list_adapters()
+    if not adapters:
+        print("[ERREUR] Aucun adaptateur Bluetooth trouvé.", file=sys.stderr)
+        sys.exit(1)
+
+    print_adapter_summary(adapters)
+    print(f"Scan en cours ({timeout:.0f}s)...")
+    devices = await scan_for_dots(timeout=timeout, adapters=adapters,
+                                  max_per_adapter=max_per_adapter)
+    if addresses:
+        addresses_upper = [a.upper() for a in addresses]
+        devices = [d for d in devices if d.address in addresses_upper]
+
+    print_scan_results(devices)
+    return devices
+
+
+async def _connect_all(devices: list[DotDevice]) -> list[DotSensor]:
+    """Crée et connecte tous les capteurs en parallèle."""
+    sensors = [
+        DotSensor(d.address, adapter=d.adapter, name=d.address)
+        for d in devices
+    ]
+
+    print(f"Connexion de {len(sensors)} capteur(s)...")
+
+    async def _connect_one(s: DotSensor) -> Optional[DotSensor]:
+        try:
+            await s.connect()
+            return s
+        except DotConnectError as exc:
+            print(f"  [ERREUR] {exc}", file=sys.stderr)
+            return None
+
+    results = await asyncio.gather(*[_connect_one(s) for s in sensors])
+    connected = [s for s in results if s is not None]
+    failed = len(sensors) - len(connected)
+
+    if failed:
+        print(f"  {failed} capteur(s) non connecté(s).")
+    print(f"  {len(connected)} capteur(s) connecté(s).\n")
+    return connected
+
+
+async def _disconnect_all(sensors: list[DotSensor]) -> None:
+    await asyncio.gather(*[s.disconnect() for s in sensors])
+
+
+# ---------------------------------------------------------------------------
+# Commandes
+# ---------------------------------------------------------------------------
+
+async def cmd_adapters(_args: argparse.Namespace) -> None:
+    adapters = list_adapters(include_down=True)
+    if not adapters:
+        print("Aucun adaptateur Bluetooth trouvé.")
+        return
+    print_adapter_summary(adapters)
+
+
+async def cmd_scan(args: argparse.Namespace) -> None:
+    await _scan_and_filter(
+        timeout=args.timeout,
+        max_per_adapter=args.max_per_adapter,
+    )
+
+
+async def cmd_record(args: argparse.Namespace) -> None:
+    devices = await _scan_and_filter(
+        timeout=args.scan_timeout,
+        max_per_adapter=args.max_per_adapter,
+    )
+    if not devices:
+        print("Aucun capteur trouvé.")
+        return
+
+    sensors = await _connect_all(devices)
+    if not sensors:
+        return
+
+    try:
+        # Synchronisation
+        print("Synchronisation des capteurs...")
+        sync_result = await synchronize_sensors(sensors, settle_time=2.0, verify_state=False)
+        print(f"  {sync_result}\n")
+        if sync_result.failed_sensors:
+            print(f"  Capteurs non synchronisés : {sync_result.failed_sensors}")
+
+        # Démarrage enregistrement
+        start_result = await start_all(sensors)
+        print(f"  {start_result}")
+        if start_result.jitter_ms is not None:
+            print(f"  Jitter start : {start_result.jitter_ms:.1f} ms")
+
+        if not start_result.success:
+            print(f"  Capteurs en erreur : {start_result.failed_sensors}", file=sys.stderr)
+
+        # Attente
+        await wait_duration(args.duration)
+
+        # Arrêt
+        stop_result = await stop_all(sensors)
+        print(f"  {stop_result}")
+
+    finally:
+        await _disconnect_all(sensors)
+
+
+async def cmd_export(args: argparse.Namespace) -> None:
+    output_dir = Path(args.output)
+    data_types = PAYLOAD_MAP[args.payload]
+
+    devices = await _scan_and_filter(
+        timeout=args.scan_timeout,
+        max_per_adapter=args.max_per_adapter,
+    )
+    if not devices:
+        print("Aucun capteur trouvé.")
+        return
+
+    sensors = await _connect_all(devices)
+    if not sensors:
+        return
+
+    try:
+        print(f"Export flash vers {output_dir}/ (payload={args.payload})...")
+        results = await export_all_sensors(sensors, output_dir, data_types)
+        print_export_summary(results)
+    finally:
+        await _disconnect_all(sensors)
+
+
+async def cmd_full(args: argparse.Namespace) -> None:
+    """Cycle complet : sync → record → stop → export."""
+    output_dir = Path(args.output)
+    data_types = PAYLOAD_MAP[args.payload]
+
+    devices = await _scan_and_filter(
+        timeout=args.scan_timeout,
+        max_per_adapter=args.max_per_adapter,
+    )
+    if not devices:
+        print("Aucun capteur trouvé.")
+        return
+
+    sensors = await _connect_all(devices)
+    if not sensors:
+        return
+
+    try:
+        # --- Sync ---
+        print("=" * 55)
+        print("ÉTAPE 1 / 4 — Synchronisation")
+        print("=" * 55)
+        sync_result = await synchronize_sensors(sensors, settle_time=2.0, verify_state=False)
+        print(f"  {sync_result}\n")
+
+        # --- Start recording ---
+        print("=" * 55)
+        print("ÉTAPE 2 / 4 — Démarrage enregistrement")
+        print("=" * 55)
+        start_result = await start_all(sensors)
+        print(f"  {start_result}")
+        if start_result.jitter_ms is not None:
+            print(f"  Jitter start : {start_result.jitter_ms:.1f} ms\n")
+
+        # --- Wait ---
+        await wait_duration(args.duration)
+
+        # --- Stop recording ---
+        print("=" * 55)
+        print("ÉTAPE 3 / 4 — Arrêt enregistrement")
+        print("=" * 55)
+        stop_result = await stop_all(sensors)
+        print(f"  {stop_result}\n")
+
+        # --- Export ---
+        print("=" * 55)
+        print(f"ÉTAPE 4 / 4 — Export flash → {output_dir}/")
+        print("=" * 55)
+        results = await export_all_sensors(sensors, output_dir, data_types)
+        print_export_summary(results)
+
+    finally:
+        await _disconnect_all(sensors)
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="xdot",
+        description="Gestionnaire multi-adaptateur BLE pour Xsens DOT",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Activer les logs DEBUG",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # adapters
+    sub.add_parser("adapters", help="Lister les adaptateurs Bluetooth disponibles")
+
+    # scan
+    p_scan = sub.add_parser("scan", help="Scanner les capteurs Xsens DOT")
+    p_scan.add_argument("--timeout", type=float, default=5.0,
+                        help="Durée du scan BLE en secondes (défaut : 5)")
+    p_scan.add_argument("--max-per-adapter", type=int, default=8,
+                        dest="max_per_adapter",
+                        help="Nombre max de capteurs par adaptateur (défaut : 8)")
+
+    # record
+    p_rec = sub.add_parser("record", help="Synchroniser et enregistrer")
+    p_rec.add_argument("--duration", type=float, default=60.0,
+                       help="Durée d'enregistrement en secondes (défaut : 60)")
+    p_rec.add_argument("--scan-timeout", type=float, default=5.0,
+                       dest="scan_timeout",
+                       help="Durée du scan initial (défaut : 5)")
+    p_rec.add_argument("--max-per-adapter", type=int, default=8,
+                       dest="max_per_adapter")
+
+    # export
+    p_exp = sub.add_parser("export", help="Exporter la mémoire flash vers CSV")
+    p_exp.add_argument("--output", default="./xdot_data",
+                       help="Répertoire de sortie (défaut : ./xdot_data)")
+    p_exp.add_argument("--payload", choices=list(PAYLOAD_MAP), default="euler",
+                       help="Type de données à exporter (défaut : euler)")
+    p_exp.add_argument("--scan-timeout", type=float, default=5.0,
+                       dest="scan_timeout")
+    p_exp.add_argument("--max-per-adapter", type=int, default=8,
+                       dest="max_per_adapter")
+
+    # full
+    p_full = sub.add_parser("full", help="Cycle complet : sync → record → stop → export")
+    p_full.add_argument("--duration", type=float, default=60.0,
+                        help="Durée d'enregistrement (défaut : 60s)")
+    p_full.add_argument("--output", default="./xdot_data",
+                        help="Répertoire de sortie CSV (défaut : ./xdot_data)")
+    p_full.add_argument("--payload", choices=list(PAYLOAD_MAP), default="euler",
+                        help="Type de données (défaut : euler)")
+    p_full.add_argument("--scan-timeout", type=float, default=5.0,
+                        dest="scan_timeout")
+    p_full.add_argument("--max-per-adapter", type=int, default=8,
+                        dest="max_per_adapter")
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Entrée principale
+# ---------------------------------------------------------------------------
+
+COMMANDS = {
+    "adapters": cmd_adapters,
+    "scan":     cmd_scan,
+    "record":   cmd_record,
+    "export":   cmd_export,
+    "full":     cmd_full,
+}
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    _setup_logging(args.verbose)
+
+    command = COMMANDS[args.command]
+    try:
+        asyncio.run(command(args))
+    except KeyboardInterrupt:
+        print("\nInterrompu par l'utilisateur.")
+        sys.exit(0)
+    except Exception as exc:
+        print(f"\n[ERREUR FATALE] {exc}", file=sys.stderr)
+        if args.verbose:
+            raise
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
