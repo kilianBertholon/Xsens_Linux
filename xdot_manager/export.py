@@ -104,7 +104,7 @@ class FileMetadata:
     sample_count: int       # Nombre d'échantillons enregistrés
     start_ts: int           # Timestamp Unix de début (secondes)
 
-    def duration_str(self, rate_hz: float = 40.0) -> str:
+    def duration_str(self, rate_hz: float = 120.0) -> str:
         """Durée estimée en secondes à partir du nb d'échantillons."""
         if rate_hz <= 0 or self.sample_count == 0:
             return "?"

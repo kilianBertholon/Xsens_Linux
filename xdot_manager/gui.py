@@ -117,6 +117,8 @@ class MainWindow(QMainWindow):
 
         # Métadonnées flash mises en cache (adresse → liste de FileMetadata)
         self._flash_metadata: dict[str, list] = {}
+        # Taux d'acquisition observé par capteur (adresse → Hz)
+        self._flash_sample_rates: dict[str, int] = {}
 
         # Compteurs de progression sync
         self._sync_total = 0
@@ -548,11 +550,22 @@ class MainWindow(QMainWindow):
                     self._log(f"  {addr} — {len(res)} fichier(s) trouvé(s)")
                 self._set_row_state(addr, "Idle")
 
+            # Lire le taux d'acquisition courant par capteur.
+            # Si indisponible, fallback à 120 Hz.
+            sample_rates: dict[str, int] = {}
+            for s in self._sensors:
+                try:
+                    rate = int(await s.cmd_get_output_rate())
+                except Exception:
+                    rate = 120
+                sample_rates[s.address] = rate
+
             self._flash_metadata = new_meta
+            self._flash_sample_rates = sample_rates
             total_files = sum(len(v) for v in new_meta.values())
             self._set_status(f"Flash info — {total_files} fichier(s) au total")
 
-            dlg = FlashInfoDialog(self._sensors, new_meta, parent=self)
+            dlg = FlashInfoDialog(self._sensors, new_meta, sample_rates=sample_rates, parent=self)
             dlg.exec()
 
         except Exception as exc:
@@ -570,7 +583,12 @@ class MainWindow(QMainWindow):
         self._purge_disconnected()
         if not self._sensors:
             return
-        dlg = ExportDialog(self._sensors, self._flash_metadata, parent=self)
+        dlg = ExportDialog(
+            self._sensors,
+            self._flash_metadata,
+            sample_rates=self._flash_sample_rates,
+            parent=self,
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         data_types = dlg.selected_data_types()
@@ -866,8 +884,9 @@ class FlashInfoDialog(QDialog):
     capteurs connectés dans un tableau.
     """
 
-    def __init__(self, sensors, flash_meta: dict, parent=None) -> None:
+    def __init__(self, sensors, flash_meta: dict, sample_rates: Optional[dict[str, int]] = None, parent=None) -> None:
         super().__init__(parent)
+        self._sample_rates = sample_rates or {}
         self.setWindowTitle("Mémoire flash — informations par capteur")
         self.setMinimumSize(820, 400)
         self.setStyleSheet(
@@ -897,7 +916,7 @@ class FlashInfoDialog(QDialog):
         layout.addWidget(summary)
 
         # Tableau
-        cols = ["Adresse", "Fichier", "Nb samples", "Durée (~40 Hz)", "Début (UTC)"]
+        cols = ["Adresse", "Fichier", "Nb samples", "Durée estimée", "Début (UTC)"]
         table = QTableWidget(0, len(cols))
         table.setHorizontalHeaderLabels(cols)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -924,10 +943,11 @@ class FlashInfoDialog(QDialog):
                     table.insertRow(row)
                     table.setItem(row, 0, QTableWidgetItem(sensor.address))
                     table.setItem(row, 1, QTableWidgetItem(f"Fichier {meta.file_index}"))
+                    rate = int(self._sample_rates.get(sensor.address, 120))
                     item_samp = QTableWidgetItem(f"{meta.sample_count:,}")
                     item_samp.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     table.setItem(row, 2, item_samp)
-                    dur = QTableWidgetItem(meta.duration_str())
+                    dur = QTableWidgetItem(f"{meta.duration_str(rate)} ({rate} Hz)")
                     dur.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     table.setItem(row, 3, dur)
                     table.setItem(row, 4, QTableWidgetItem(meta.start_datetime()))
@@ -1023,10 +1043,17 @@ class ExportDialog(QDialog):
         ("Complet (tous les types)", "full"),
     ]
 
-    def __init__(self, sensors, flash_meta: dict, parent=None) -> None:
+    def __init__(
+        self,
+        sensors,
+        flash_meta: dict,
+        sample_rates: Optional[dict[str, int]] = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._sensors = sensors
         self._flash_meta = flash_meta
+        self._sample_rates = sample_rates or {}
         # Checkboxes par adresse → liste de (file_index, QCheckBox)
         self._file_checks: dict[str, list[tuple[int, QCheckBox]]] = {}
 
@@ -1114,10 +1141,11 @@ class ExportDialog(QDialog):
                     inner_layout.addWidget(empty_lbl)
                 else:
                     for meta in metas:
+                        rate = int(self._sample_rates.get(sensor.address, 120))
                         cb = QCheckBox(
                             f"  Fichier {meta.file_index} — "
                             f"{meta.sample_count:,} éch., "
-                            f"{meta.duration_str()} à 40 Hz, "
+                            f"{meta.duration_str(rate)} à {rate} Hz, "
                             f"débuté le {meta.start_datetime()}"
                         )
                         cb.setChecked(True)
