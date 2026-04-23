@@ -23,9 +23,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
 from typing import Optional
 
 from .adapters import list_adapters, print_adapter_summary
@@ -34,21 +32,9 @@ from .sensor import DotSensor, DotError, DotConnectError
 from .sync import synchronize_sensors, SyncResult
 from .recording import start_all, stop_all, wait_duration
 from .export import export_all_sensors, print_export_summary, PRESET_EULER, PRESET_QUATERNION, PRESET_IMU, PRESET_FULL
+from .campaign import run_reliability_campaign, format_campaign_summary
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class CampaignRunResult:
-    run_index: int
-    ok: bool
-    detected: int
-    connected: int
-    sync_ms: float
-    start_ms: float
-    stop_ms: float
-    jitter_ms: Optional[float]
-    errors: list[str]
 
 # ---------------------------------------------------------------------------
 # Payloads disponibles
@@ -272,8 +258,6 @@ async def cmd_full(args: argparse.Namespace) -> None:
 
 async def cmd_campaign(args: argparse.Namespace) -> None:
     """Campagne de reproductibilité: N runs scan→connect→sync→start→stop."""
-    run_results: list[CampaignRunResult] = []
-
     print("=" * 72)
     print("CAMPAGNE FIABILITÉ")
     print("=" * 72)
@@ -285,179 +269,18 @@ async def cmd_campaign(args: argparse.Namespace) -> None:
         print(f"expected_count={args.expected_count}")
     print()
 
-    for run_idx in range(1, args.runs + 1):
-        sensors: list[DotSensor] = []
-        detected = 0
-        connected = 0
-        sync_ms = 0.0
-        start_ms = 0.0
-        stop_ms = 0.0
-        jitter_ms: Optional[float] = None
-        errors: list[str] = []
-
-        print("-" * 72)
-        print(f"RUN {run_idx}/{args.runs}")
-        print("-" * 72)
-
-        try:
-            devices = await _scan_and_filter(
-                timeout=args.scan_timeout,
-                max_per_adapter=args.max_per_adapter,
-            )
-            detected = len(devices)
-            if detected == 0:
-                errors.append("Aucun capteur détecté")
-                run_results.append(
-                    CampaignRunResult(
-                        run_index=run_idx,
-                        ok=False,
-                        detected=detected,
-                        connected=connected,
-                        sync_ms=sync_ms,
-                        start_ms=start_ms,
-                        stop_ms=stop_ms,
-                        jitter_ms=jitter_ms,
-                        errors=errors,
-                    )
-                )
-                continue
-
-            sensors = await _connect_all(devices)
-            connected = len(sensors)
-            if connected == 0:
-                errors.append("Aucun capteur connecté")
-                run_results.append(
-                    CampaignRunResult(
-                        run_index=run_idx,
-                        ok=False,
-                        detected=detected,
-                        connected=connected,
-                        sync_ms=sync_ms,
-                        start_ms=start_ms,
-                        stop_ms=stop_ms,
-                        jitter_ms=jitter_ms,
-                        errors=errors,
-                    )
-                )
-                continue
-
-            if args.expected_count is not None and connected < args.expected_count:
-                errors.append(
-                    f"Capteurs connectés insuffisants: {connected}/{args.expected_count}"
-                )
-
-            sync_result = await synchronize_sensors(
-                sensors,
-                settle_time=2.0,
-                verify_state=False,
-                await_sync_ack=False,
-            )
-            sync_ms = sync_result.duration_ms
-            if not sync_result.success:
-                errors.extend(
-                    [f"sync:{addr}:{msg}" for addr, msg in sync_result.errors.items()]
-                )
-
-            start_result = await start_all(sensors)
-            start_ms = start_result.total_duration_ms
-            jitter_ms = start_result.jitter_ms
-            if not start_result.success:
-                errors.extend(
-                    [f"start:{addr}:{msg}" for addr, msg in start_result.errors.items()]
-                )
-
-            await wait_duration(args.duration, label=f"Run {run_idx} enregistrement")
-
-            stop_result = await stop_all(sensors)
-            stop_ms = stop_result.total_duration_ms
-            if not stop_result.success:
-                errors.extend(
-                    [f"stop:{addr}:{msg}" for addr, msg in stop_result.errors.items()]
-                )
-
-            ok = len(errors) == 0
-            run_results.append(
-                CampaignRunResult(
-                    run_index=run_idx,
-                    ok=ok,
-                    detected=detected,
-                    connected=connected,
-                    sync_ms=sync_ms,
-                    start_ms=start_ms,
-                    stop_ms=stop_ms,
-                    jitter_ms=jitter_ms,
-                    errors=errors,
-                )
-            )
-
-            print(
-                f"RUN {run_idx}: {'OK' if ok else 'KO'} | "
-                f"detected={detected} connected={connected} | "
-                f"sync={sync_ms:.0f}ms start={start_ms:.0f}ms stop={stop_ms:.0f}ms "
-                f"jitter={'?' if jitter_ms is None else f'{jitter_ms:.1f}ms'}"
-            )
-            if errors:
-                for e in errors[:10]:
-                    print(f"  - {e}")
-                if len(errors) > 10:
-                    print(f"  - ... {len(errors) - 10} erreur(s) supplémentaire(s)")
-
-        except Exception as exc:
-            errors.append(f"run_exception:{exc}")
-            run_results.append(
-                CampaignRunResult(
-                    run_index=run_idx,
-                    ok=False,
-                    detected=detected,
-                    connected=connected,
-                    sync_ms=sync_ms,
-                    start_ms=start_ms,
-                    stop_ms=stop_ms,
-                    jitter_ms=jitter_ms,
-                    errors=errors,
-                )
-            )
-            print(f"RUN {run_idx}: KO (exception) — {exc}")
-        finally:
-            if sensors:
-                await _disconnect_all(sensors)
-            if run_idx < args.runs and args.cooldown > 0:
-                await asyncio.sleep(args.cooldown)
-
-    # Résumé final
-    total = len(run_results)
-    ok_runs = sum(1 for r in run_results if r.ok)
-    ko_runs = total - ok_runs
-    success_pct = (ok_runs / total * 100.0) if total else 0.0
-
-    sync_vals = [r.sync_ms for r in run_results if r.sync_ms > 0]
-    start_vals = [r.start_ms for r in run_results if r.start_ms > 0]
-    stop_vals = [r.stop_ms for r in run_results if r.stop_ms > 0]
-    jitter_vals = [r.jitter_ms for r in run_results if r.jitter_ms is not None]
-
+    summary = await run_reliability_campaign(
+        runs=args.runs,
+        duration=args.duration,
+        scan_timeout=args.scan_timeout,
+        max_per_adapter=args.max_per_adapter,
+        expected_count=args.expected_count,
+        cooldown=args.cooldown,
+        event_callback=print,
+    )
     print()
-    print("=" * 72)
-    print("RÉSUMÉ CAMPAGNE")
-    print("=" * 72)
-    print(f"Runs: {total} | OK: {ok_runs} | KO: {ko_runs} | Success: {success_pct:.1f}%")
-    if sync_vals:
-        print(f"Sync   ms: avg={mean(sync_vals):.0f}  min={min(sync_vals):.0f}  max={max(sync_vals):.0f}")
-    if start_vals:
-        print(f"Start  ms: avg={mean(start_vals):.0f}  min={min(start_vals):.0f}  max={max(start_vals):.0f}")
-    if stop_vals:
-        print(f"Stop   ms: avg={mean(stop_vals):.0f}  min={min(stop_vals):.0f}  max={max(stop_vals):.0f}")
-    if jitter_vals:
-        print(f"Jitter ms: avg={mean(jitter_vals):.1f}  min={min(jitter_vals):.1f}  max={max(jitter_vals):.1f}")
-
-    error_counts: dict[str, int] = {}
-    for r in run_results:
-        for e in r.errors:
-            key = e.split(":", 1)[0]
-            error_counts[key] = error_counts.get(key, 0) + 1
-    if error_counts:
-        print("Erreurs fréquentes:")
-        for key, cnt in sorted(error_counts.items(), key=lambda kv: kv[1], reverse=True):
-            print(f"  {key}: {cnt}")
+    for line in format_campaign_summary(summary):
+        print(line)
 
 
 # ---------------------------------------------------------------------------

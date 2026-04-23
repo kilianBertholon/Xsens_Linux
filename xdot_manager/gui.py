@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 from datetime import datetime
+from statistics import mean
 from pathlib import Path
 from typing import Optional
 
@@ -20,8 +21,9 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent, QColor, QFont, QIcon, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
+    QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QSplitter, QStatusBar,
+    QSpinBox,
     QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 import qasync
@@ -223,11 +225,12 @@ class MainWindow(QMainWindow):
         self._btn_export  = _btn("💾 Exporter",       self._on_export, "#1565c0")
         self._btn_erase   = _btn("🗑 Effacer flash",  self._on_erase, "#b45309")
         self._btn_analyse = _btn("📊 Analyse sync",   self._on_analyse, "#1a6b4a")
+        self._btn_campaign = _btn("🧪 Campagne",      self._on_campaign, "#6d28d9")
 
         for b in [self._btn_scan, self._btn_connect, self._btn_sync,
                   self._btn_rec, self._btn_stop, self._btn_config,
                   self._btn_flash, self._btn_export, self._btn_erase,
-                  self._btn_analyse]:
+                self._btn_analyse, self._btn_campaign]:
             layout.addWidget(b)
 
         layout.addStretch()
@@ -270,6 +273,7 @@ class MainWindow(QMainWindow):
     def _on_export(self)      : asyncio.ensure_future(self._export_with_dialog())
     def _on_erase(self)       : asyncio.ensure_future(self._erase())
     def _on_analyse(self)     : self._show_jitter_dialog()
+    def _on_campaign(self)    : asyncio.ensure_future(self._campaign())
     def _on_refresh_adapters(self): self._refresh_adapter_indicator(log=True)
 
     def _refresh_adapter_indicator(self, log: bool = False) -> None:
@@ -739,6 +743,64 @@ class MainWindow(QMainWindow):
             self._set_busy(False)
             self._refresh_buttons()
 
+    async def _campaign(self) -> None:
+        """Lance une campagne de reproductibilité depuis la GUI."""
+        dlg = CampaignSettingsDialog(parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        cfg = dlg.values()
+        self._log(
+            "Lancement campagne fiabilité — "
+            f"runs={cfg['runs']}, duration={cfg['duration']:.1f}s, "
+            f"scan_timeout={cfg['scan_timeout']:.1f}s, "
+            f"cooldown={cfg['cooldown']:.1f}s"
+            + (
+                f", expected_count={cfg['expected_count']}"
+                if cfg['expected_count'] is not None else ""
+            )
+        )
+        self._set_status("Campagne fiabilité en cours...")
+        self._set_busy(True)
+
+        try:
+            from .campaign import run_reliability_campaign, format_campaign_summary
+
+            def _cb(msg: str) -> None:
+                self._log(msg)
+
+            summary = await run_reliability_campaign(
+                runs=cfg["runs"],
+                duration=cfg["duration"],
+                scan_timeout=cfg["scan_timeout"],
+                max_per_adapter=cfg["max_per_adapter"],
+                expected_count=cfg["expected_count"],
+                cooldown=cfg["cooldown"],
+                event_callback=_cb,
+            )
+
+            lines = format_campaign_summary(summary)
+            color = "#a6e3a1" if summary.success_pct >= 99.9 else "#f1c40f"
+            self._log(f"<span style='color:{color}'><b>{lines[3]}</b></span>")
+            for line in lines[4:]:
+                self._log(line)
+
+            jitter_vals = [
+                r.jitter_ms for r in summary.run_results if r.jitter_ms is not None
+            ]
+            jitter_avg = mean(jitter_vals) if jitter_vals else 0.0
+            self._set_status(
+                f"Campagne terminée — success {summary.success_pct:.1f}%"
+                + (f" — jitter moyen {jitter_avg:.1f} ms" if jitter_vals else "")
+            )
+        except Exception as exc:
+            self._log(f"<span style='color:#f38ba8'>[ERREUR campagne] {exc}</span>")
+            self._set_status("Campagne terminée avec erreurs")
+        finally:
+            self._set_busy(False)
+            self._refresh_adapter_indicator()
+            self._refresh_buttons()
+
     # ── Helpers UI ────────────────────────────────────────────────────────
 
     def _tick_timer(self) -> None:
@@ -772,7 +834,7 @@ class MainWindow(QMainWindow):
         for b in [self._btn_scan, self._btn_connect, self._btn_sync,
                   self._btn_rec, self._btn_config, self._btn_flash,
                 self._btn_export, self._btn_erase, self._btn_analyse,
-                self._btn_refresh_adapters]:
+                self._btn_campaign, self._btn_refresh_adapters]:
             b.setEnabled(not busy)
         # btn_stop : actif si enregistrement en cours, même pendant busy
         self._btn_stop.setEnabled(self._recording)
@@ -810,6 +872,7 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(connected and not self._recording)
         self._btn_erase.setEnabled(connected and not self._recording)
         self._btn_analyse.setEnabled(has_export)
+        self._btn_campaign.setEnabled(not self._recording)
 
     # ── Analyse jitter ────────────────────────────────────────────────────
 
@@ -1074,6 +1137,89 @@ class RecordingSettingsDialog(QDialog):
 
     def selected_rate(self) -> int:
         return self._rate
+
+
+class CampaignSettingsDialog(QDialog):
+    """Dialogue de configuration de la campagne fiabilité."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("🧪 Campagne fiabilité")
+        self.setMinimumWidth(380)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "Exécute plusieurs runs : scan → connexion → sync → start → stop\n"
+            "et calcule le taux de succès + timings + jitter."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        def _row(label: str, widget: QWidget) -> None:
+            r = QHBoxLayout()
+            r.addWidget(QLabel(label))
+            r.addWidget(widget)
+            layout.addLayout(r)
+
+        self._runs = QSpinBox()
+        self._runs.setRange(1, 100)
+        self._runs.setValue(5)
+        _row("Runs :", self._runs)
+
+        self._duration = QDoubleSpinBox()
+        self._duration.setRange(1.0, 3600.0)
+        self._duration.setDecimals(1)
+        self._duration.setSingleStep(1.0)
+        self._duration.setValue(10.0)
+        self._duration.setSuffix(" s")
+        _row("Durée run :", self._duration)
+
+        self._scan_timeout = QDoubleSpinBox()
+        self._scan_timeout.setRange(1.0, 60.0)
+        self._scan_timeout.setDecimals(1)
+        self._scan_timeout.setSingleStep(1.0)
+        self._scan_timeout.setValue(8.0)
+        self._scan_timeout.setSuffix(" s")
+        _row("Scan timeout :", self._scan_timeout)
+
+        self._cooldown = QDoubleSpinBox()
+        self._cooldown.setRange(0.0, 60.0)
+        self._cooldown.setDecimals(1)
+        self._cooldown.setSingleStep(0.5)
+        self._cooldown.setValue(2.0)
+        self._cooldown.setSuffix(" s")
+        _row("Cooldown :", self._cooldown)
+
+        self._expected = QSpinBox()
+        self._expected.setRange(0, 128)
+        self._expected.setValue(12)
+        self._expected.setToolTip("0 = ne pas valider le nombre de capteurs attendu")
+        _row("Expected count :", self._expected)
+
+        self._max_per_adapter = QSpinBox()
+        self._max_per_adapter.setRange(1, 32)
+        self._max_per_adapter.setValue(8)
+        _row("Max/adaptateur :", self._max_per_adapter)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def values(self) -> dict:
+        expected = self._expected.value()
+        return {
+            "runs": int(self._runs.value()),
+            "duration": float(self._duration.value()),
+            "scan_timeout": float(self._scan_timeout.value()),
+            "cooldown": float(self._cooldown.value()),
+            "expected_count": int(expected) if expected > 0 else None,
+            "max_per_adapter": int(self._max_per_adapter.value()),
+        }
 
 
 # ── Dialogue d'export ─────────────────────────────────────────────────────────
