@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from statistics import mean
 from pathlib import Path
@@ -96,6 +97,13 @@ QFrame#toolbar {
     border-radius: 0;
 }
 """
+
+
+@dataclass
+class PreflightResult:
+    ok: bool
+    summary: str
+    details: list[tuple[str, str, str]]  # (label, value, severity)
 
 # ── Widget principal ──────────────────────────────────────────────────────────
 
@@ -284,12 +292,103 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         action = dlg.selected_action()
+        if action == "preflight":
+            await self._show_preflight()
+            return
         if action == "settings":
             await self._configure_rate()
         elif action == "campaign":
             await self._campaign()
         elif action == "analysis":
             self._show_jitter_dialog()
+
+    async def _run_preflight(self) -> PreflightResult:
+        """Exécute un contrôle préalable détaillé.
+
+        Vérifie : dongles, capteurs, fréquence 120 Hz, état Idle.
+        """
+        details: list[tuple[str, str, str]] = []
+        ok = True
+        up_count = 0
+
+        try:
+            adapters = list_adapters(include_down=True)
+            up_count = sum(1 for a in adapters if a.is_up)
+            details.append(("Dongles", f"{up_count}/{len(adapters)} UP", "ok" if up_count else "err"))
+            if up_count == 0:
+                ok = False
+        except Exception as exc:
+            details.append(("Dongles", f"Erreur: {exc}", "err"))
+            ok = False
+
+        self._purge_disconnected()
+        if not self._sensors:
+            details.append(("Capteurs connectés", "0", "err"))
+            ok = False
+            return PreflightResult(ok=False, summary="Aucun capteur connecté.", details=details)
+
+        details.append(("Capteurs connectés", f"{len(self._sensors)}", "ok"))
+
+        rate = None
+        try:
+            rate = int(await self._sensors[0].cmd_get_output_rate())
+        except Exception as exc:
+            details.append(("Taux acquisition", f"Lecture impossible: {exc}", "warn"))
+        else:
+            if rate == 120:
+                details.append(("Taux acquisition", "120 Hz", "ok"))
+            else:
+                details.append(("Taux acquisition", f"{rate} Hz (sera forcé à 120 Hz)", "warn"))
+
+        idle_ok = 0
+        idle_warn = 0
+        state_errors = 0
+        for s in self._sensors:
+            try:
+                st = await s.cmd_get_state()
+                state_name = STATE_NAMES.get(st, f"0x{st:02x}")
+                if st == STATE_IDLE:
+                    idle_ok += 1
+                else:
+                    idle_warn += 1
+                details.append((s.address[-11:], state_name, "ok" if st == STATE_IDLE else "warn"))
+            except Exception as exc:
+                state_errors += 1
+                details.append((s.address[-11:], f"Erreur état: {exc}", "err"))
+                ok = False
+
+        if state_errors:
+            ok = False
+        elif idle_warn == 0:
+            details.append(("État capteurs", "Tous en Idle", "ok"))
+        else:
+            details.append(("État capteurs", f"{idle_ok}/{len(self._sensors)} en Idle", "warn"))
+
+        summary = (
+            f"{len(self._sensors)} capteur(s), {up_count} dongle(s) UP, "
+            f"taux cible 120 Hz{' (déjà OK)' if rate == 120 else ''}."
+        )
+        if idle_warn:
+            summary += " Certains capteurs ne sont pas Idle."
+        return PreflightResult(ok=ok and idle_warn == 0, summary=summary, details=details)
+
+    def _log_preflight_result(self, result: PreflightResult) -> None:
+        self._log("─── Préflight ──────────────────────────────────────")
+        color = "#a6e3a1" if result.ok else "#f1c40f"
+        self._log(f"  <span style='color:{color}'><b>{result.summary}</b></span>")
+        for label, value, severity in result.details:
+            if severity == "err":
+                self._log(f"  <span style='color:#f38ba8'>{label}: {value}</span>")
+            elif severity == "warn":
+                self._log(f"  <span style='color:#f1c40f'>{label}: {value}</span>")
+            else:
+                self._log(f"  <span style='color:#a6e3a1'>{label}: {value}</span>")
+
+    async def _show_preflight(self) -> None:
+        result = await self._run_preflight()
+        self._log_preflight_result(result)
+        dlg = PreflightDialog(result, parent=self)
+        dlg.exec()
 
     def _refresh_adapter_indicator(self, log: bool = False) -> None:
         """Met à jour l'indicateur visuel des dongles (UP/DOWN + charge)."""
@@ -426,6 +525,8 @@ class MainWindow(QMainWindow):
         if not self._sensors:
             self._log("[AVERTISSEMENT] Aucun capteur connecté après purge.")
             return
+        preflight = await self._run_preflight()
+        self._log_preflight_result(preflight)
         await self._ensure_output_rate(120)
         n = len(self._sensors)
         self._sync_total = n
@@ -815,10 +916,11 @@ class MainWindow(QMainWindow):
                 if cfg['expected_count'] is not None else ""
             )
         )
-        self._set_status("Campagne fiabilité en cours...")
-        self._set_busy(True)
-
         try:
+            preflight = await self._run_preflight()
+            self._log_preflight_result(preflight)
+            self._set_status("Campagne fiabilité en cours...")
+            self._set_busy(True)
             from .campaign import run_reliability_campaign, format_campaign_summary
 
             def _cb(msg: str) -> None:
@@ -1307,6 +1409,11 @@ class TestToolsDialog(QDialog):
         btn_campaign.clicked.connect(lambda: self._choose("campaign"))
         layout.addWidget(btn_campaign)
 
+        btn_preflight = QPushButton("✅ Préflight")
+        btn_preflight.setToolTip("Contrôle préalable : dongles, capteurs, 120 Hz, Idle")
+        btn_preflight.clicked.connect(lambda: self._choose("preflight"))
+        layout.addWidget(btn_preflight)
+
         btn_settings = QPushButton("⚙ Réglages acquisition")
         btn_settings.setToolTip("Configurer le taux d'acquisition (ex: 120 Hz)")
         btn_settings.setEnabled(has_connected)
@@ -1333,6 +1440,44 @@ class TestToolsDialog(QDialog):
 
     def selected_action(self) -> Optional[str]:
         return self._action
+
+
+class PreflightDialog(QDialog):
+    """Affiche les résultats du contrôle préalable."""
+
+    def __init__(self, result: PreflightResult, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("✅ Préflight")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel(
+            f"<b>{'Préflight OK' if result.ok else 'Préflight avec alertes'}</b><br>{result.summary}"
+        )
+        title.setWordWrap(True)
+        title.setTextFormat(Qt.TextFormat.RichText)
+        title.setStyleSheet(
+            f"color: {'#a6e3a1' if result.ok else '#f1c40f'}; font-size: 10pt;"
+        )
+        layout.addWidget(title)
+
+        for label, value, severity in result.details:
+            color = {
+                "ok": "#a6e3a1",
+                "warn": "#f1c40f",
+                "err": "#f38ba8",
+                "info": "#89dceb",
+            }.get(severity, "#cdd6f4")
+            row = QLabel(f"<b>{label}</b> : <span style='color:{color}'>{value}</span>")
+            row.setTextFormat(Qt.TextFormat.RichText)
+            row.setWordWrap(True)
+            layout.addWidget(row)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
 
 
 # ── Dialogue d'export ─────────────────────────────────────────────────────────
