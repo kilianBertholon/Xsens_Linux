@@ -119,6 +119,8 @@ class MainWindow(QMainWindow):
         self._flash_metadata: dict[str, list] = {}
         # Taux d'acquisition observé par capteur (adresse → Hz)
         self._flash_sample_rates: dict[str, int] = {}
+        # Cache adaptateurs visibles dans la toolbar
+        self._known_adapters: list = []
 
         # Compteurs de progression sync
         self._sync_total = 0
@@ -129,6 +131,7 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._tick_timer)
 
         self._build_ui()
+        self._refresh_adapter_indicator()
         self._log("Xsens DOT Manager démarré.")
         self._refresh_buttons()
 
@@ -229,17 +232,15 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        # Indicateur adaptateurs
-        try:
-            adapters = list_adapters()
-            ada_text = "  ".join(
-                f"<b>{a.bleak_id}</b> ({a.address})" for a in adapters
-            )
-        except Exception:
-            ada_text = "—"
-        lbl_ada = QLabel(f"Adaptateurs : {ada_text}")
-        lbl_ada.setStyleSheet("color: #89dceb; font-size: 8pt;")
-        layout.addWidget(lbl_ada)
+        # Indicateur adaptateurs/dongles (refreshable)
+        self._btn_refresh_adapters = _btn("↻ Dongles", self._on_refresh_adapters, "#334155")
+        self._btn_refresh_adapters.setToolTip("Rafraîchir la disponibilité des dongles")
+        layout.addWidget(self._btn_refresh_adapters)
+
+        self._lbl_adapters = QLabel("Dongles : …")
+        self._lbl_adapters.setStyleSheet("color: #89dceb; font-size: 8pt;")
+        self._lbl_adapters.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self._lbl_adapters)
 
         return frame
 
@@ -269,6 +270,50 @@ class MainWindow(QMainWindow):
     def _on_export(self)      : asyncio.ensure_future(self._export_with_dialog())
     def _on_erase(self)       : asyncio.ensure_future(self._erase())
     def _on_analyse(self)     : self._show_jitter_dialog()
+    def _on_refresh_adapters(self): self._refresh_adapter_indicator(log=True)
+
+    def _refresh_adapter_indicator(self, log: bool = False) -> None:
+        """Met à jour l'indicateur visuel des dongles (UP/DOWN + charge)."""
+        try:
+            adapters = list_adapters(include_down=True)
+        except Exception as exc:
+            self._lbl_adapters.setText("Dongles : indisponibles")
+            self._lbl_adapters.setToolTip(str(exc))
+            if log:
+                self._log(f"<span style='color:#f38ba8'>[ERREUR dongles] {exc}</span>")
+            return
+
+        self._known_adapters = adapters
+        up_count = sum(1 for a in adapters if a.is_up)
+        total = len(adapters)
+
+        scanned_by_adapter: dict[str, int] = {}
+        for d in self._devices:
+            name = d.adapter.bleak_id if getattr(d, "adapter", None) else "?"
+            scanned_by_adapter[name] = scanned_by_adapter.get(name, 0) + 1
+
+        connected_by_adapter: dict[str, int] = {}
+        for s in self._sensors:
+            name = s.adapter.name if s.adapter else "?"
+            connected_by_adapter[name] = connected_by_adapter.get(name, 0) + 1
+
+        parts: list[str] = []
+        tips: list[str] = []
+        for a in adapters:
+            icon = "🟢" if a.is_up else "🔴"
+            sc = scanned_by_adapter.get(a.name, 0)
+            cc = connected_by_adapter.get(a.name, 0)
+            parts.append(f"{icon}<b>{a.name}</b> {cc}/{sc}")
+            tips.append(
+                f"{a.name} [{a.address}] — {'UP' if a.is_up else 'DOWN'} — "
+                f"connectés={cc}, scannés={sc}"
+            )
+
+        detail = "  ".join(parts) if parts else "—"
+        self._lbl_adapters.setText(f"Dongles : <b>{up_count}/{total}</b> UP  |  {detail}")
+        self._lbl_adapters.setToolTip("\n".join(tips) if tips else "Aucun dongle détecté")
+        if log:
+            self._log(f"Dongles : {up_count}/{total} UP")
 
     # ── Logique async ─────────────────────────────────────────────────────
 
@@ -301,6 +346,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._log(f"<span style='color:#f38ba8'>[ERREUR scan] {exc}</span>")
         finally:
+            self._refresh_adapter_indicator()
             self._set_busy(False)
             self._refresh_buttons()
 
@@ -350,6 +396,7 @@ class MainWindow(QMainWindow):
             + (f"  [{dist_str}]" if dist_str else "")
         )
         self._set_status(f"{n} connecté(s)")
+        self._refresh_adapter_indicator()
         self._set_busy(False)
         self._refresh_buttons()
 
@@ -724,7 +771,8 @@ class MainWindow(QMainWindow):
         """
         for b in [self._btn_scan, self._btn_connect, self._btn_sync,
                   self._btn_rec, self._btn_config, self._btn_flash,
-                  self._btn_export, self._btn_erase, self._btn_analyse]:
+                self._btn_export, self._btn_erase, self._btn_analyse,
+                self._btn_refresh_adapters]:
             b.setEnabled(not busy)
         # btn_stop : actif si enregistrement en cours, même pendant busy
         self._btn_stop.setEnabled(self._recording)
@@ -744,6 +792,7 @@ class MainWindow(QMainWindow):
             for s in lost:
                 self._set_row_state(s.address, "ERREUR")
             self._sensors = [s for s in self._sensors if s.is_connected]
+            self._refresh_adapter_indicator()
             self._refresh_buttons()
         return len(lost)
 
