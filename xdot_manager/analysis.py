@@ -5,7 +5,7 @@ Lit les fichiers CSV exportés et calcule l'écart temporel entre le premier
 échantillon de chaque capteur — indicateur de qualité de la synchronisation.
 
 Seuil de référence (spéc Xsens DOT) : ≤ 25 ms pour une sync correcte
-(≈ 1 échantillon à 40 Hz).
+(≈ 1 échantillon à 40 Hz ; à 120 Hz, ce seuil reste conservateur).
 """
 from __future__ import annotations
 
@@ -46,6 +46,9 @@ class JitterResult:
 
     # Erreurs par adresse
     errors: dict[str, str] = field(default_factory=dict)
+
+    # Détails de diagnostic (messages lisibles)
+    diagnostics: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -95,6 +98,27 @@ def _read_first_timestamp(csv_path: Path) -> Optional[float]:
     return None
 
 
+def _first_timestamp_for_address(output_dir: Path, addr: str) -> tuple[Optional[float], str]:
+    """Retourne (timestamp, reason) pour une adresse capteur.
+
+    reason est vide si timestamp trouvé, sinon contient la cause.
+    """
+    addr_clean = addr.replace(":", "-")
+    existing_files: list[Path] = []
+    for file_idx in range(1, 20):
+        csv_path = output_dir / f"{addr_clean}_file{file_idx:02d}.csv"
+        if not csv_path.exists():
+            continue
+        existing_files.append(csv_path)
+        ts = _read_first_timestamp(csv_path)
+        if ts is not None:
+            return ts, ""
+
+    if not existing_files:
+        return None, "Aucun fichier CSV trouvé (file01..file19)"
+    return None, "CSV trouvé(s) mais sans colonne/valeur timestamp_ms lisible"
+
+
 # ---------------------------------------------------------------------------
 # API principale
 # ---------------------------------------------------------------------------
@@ -119,22 +143,20 @@ def analyze_sync_jitter(
     result = JitterResult(n_sensors=len(addresses))
     timestamps: dict[str, float] = {}
 
+    if not output_dir.exists():
+        result.diagnostics.append(f"Répertoire introuvable : {output_dir}")
+        for addr in addresses:
+            result.errors[addr] = "Répertoire export absent"
+        return result
+
     for addr in addresses:
-        addr_clean = addr.replace(":", "-")
-        # Cherche le premier fichier CSV disponible (file01, file02, ...)
-        ts: Optional[float] = None
-        for file_idx in range(1, 20):
-            csv_path = output_dir / f"{addr_clean}_file{file_idx:02d}.csv"
-            if csv_path.exists():
-                ts = _read_first_timestamp(csv_path)
-                if ts is not None:
-                    break
+        ts, reason = _first_timestamp_for_address(output_dir, addr)
         if ts is not None:
             timestamps[addr] = ts
             result.n_ok += 1
         else:
-            result.errors[addr] = "Aucun CSV lisible"
-            logger.warning("[%s] Aucun timestamp trouvé dans output_dir=%s", addr, output_dir)
+            result.errors[addr] = reason
+            logger.warning("[%s] Timestamp indisponible dans output_dir=%s : %s", addr, output_dir, reason)
 
     result.first_timestamps = timestamps
 
@@ -147,6 +169,20 @@ def analyze_sync_jitter(
     elif len(timestamps) == 1:
         result.jitter_max_ms = 0.0
         result.root_address = next(iter(timestamps))
+
+    if result.n_ok < 2:
+        result.diagnostics.append(
+            "Analyse impossible : moins de 2 capteurs avec timestamp exploitable."
+        )
+        result.diagnostics.append(
+            "Vérifier qu'un export a été fait et que le payload inclut la colonne timestamp_ms."
+        )
+    elif result.jitter_max_ms > JITTER_THRESHOLD_MS:
+        result.diagnostics.append(
+            f"Jitter au-dessus du seuil ({result.jitter_max_ms:.1f} ms > {JITTER_THRESHOLD_MS:.0f} ms)."
+        )
+    else:
+        result.diagnostics.append("Synchronisation dans la plage attendue.")
 
     logger.info("Analyse jitter : %s", result)
     return result

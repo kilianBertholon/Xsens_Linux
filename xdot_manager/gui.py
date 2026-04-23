@@ -900,6 +900,7 @@ class MainWindow(QMainWindow):
             f"<b>{jitter.jitter_max_ms:.1f} ms</b></span> "
             f"(seuil {JITTER_THRESHOLD_MS:.0f} ms) — <b>{state_str}</b>"
         )
+        self._log(f"  Capteurs exploitables : {jitter.n_ok}/{jitter.n_sensors}")
         offsets = jitter.offsets_ms
         if offsets:
             self._log("  Offsets par capteur (réf = plus tôt) :")
@@ -912,6 +913,10 @@ class MainWindow(QMainWindow):
                     f"    <span style='font-family:monospace'>{addr[-11:]}</span>  "
                     f"<span style='color:{col}'>{sign}{off:.1f} ms  {bar}</span>"
                 )
+        if getattr(jitter, "diagnostics", None):
+            self._log("  Diagnostic :")
+            for msg in jitter.diagnostics:
+                self._log(f"    {msg}")
         if jitter.errors:
             for addr, err in jitter.errors.items():
                 self._log(f"  <span style='color:#f38ba8'>  {addr}: {err}</span>")
