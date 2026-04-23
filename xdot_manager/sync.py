@@ -61,13 +61,13 @@ class SyncResult:
 # Envoi de la commande de sync à un capteur (tâche individuelle)
 # ---------------------------------------------------------------------------
 
-async def _sync_one(sensor: DotSensor, root_mac: str) -> tuple[bool, str]:
+async def _sync_one(sensor: DotSensor, root_mac: str, read_ack: bool = True) -> tuple[bool, str]:
     """
     Envoie start_syncing(root_mac) à un capteur.
     Retourne (success, error_message).
     """
     try:
-        await sensor.cmd_send_syncing(root_mac)
+        await sensor.cmd_send_syncing(root_mac, read_ack=read_ack)
         return True, ""
     except DotError as exc:
         msg = str(exc)
@@ -92,6 +92,7 @@ async def synchronize_sensors(
     idle_poll_interval: float = 0.5,
     idle_timeout: float = 30.0,
     progress_callback: Optional[Callable[[str, str], None]] = None,
+    await_sync_ack: bool = False,
 ) -> SyncResult:
     """
     Synchronise un groupe de capteurs Xsens DOT.
@@ -109,6 +110,8 @@ async def synchronize_sensors(
         progress_callback : appelable optionnel (address, status) appelé
                             à chaque évènement par capteur.
                             status ∈ {"syncing", "synced", "idle", "error"}.
+        await_sync_ack    : si False (défaut), envoie start_syncing sans attendre
+                    l'ACK applicatif pour maximiser la simultanéité LED.
 
     Returns:
         SyncResult avec le détail de la réussite par capteur.
@@ -150,7 +153,7 @@ async def synchronize_sensors(
     async def _sync_with_cb(sensor: DotSensor) -> tuple[bool, str]:
         if progress_callback:
             progress_callback(sensor.address, "syncing")
-        ok, err = await _sync_one(sensor, root_mac)
+        ok, err = await _sync_one(sensor, root_mac, read_ack=await_sync_ack)
         if progress_callback:
             progress_callback(sensor.address, "synced" if ok else "error")
         return ok, err

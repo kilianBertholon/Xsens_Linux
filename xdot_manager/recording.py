@@ -100,8 +100,22 @@ async def start_all(sensors: list[DotSensor]) -> RecordingResult:
     t0 = time.monotonic()
     timestamps: list[float] = []
 
-    tasks = [_record_one(s, "start", timestamps) for s in sensors]
-    outcomes = await asyncio.gather(*tasks)
+    # Group sensors by adapter to serialize operations per dongle
+    adapters: dict[str, list[DotSensor]] = {}
+    for s in sensors:
+        key = s.adapter.name if s.adapter else "local"
+        adapters.setdefault(key, []).append(s)
+
+    # Stagger between sensor commands to reduce RF collisions
+    STAGGER_SEC = 0.02  # 20 ms
+
+    outcomes: list[tuple[bool, str]] = []
+    # Process adapters sequentially (most conservative for reproducibility)
+    for adapter_name, group in adapters.items():
+        for s in group:
+            res = await _record_one(s, "start", timestamps)
+            outcomes.append(res)
+            await asyncio.sleep(STAGGER_SEC)
 
     per_sensor: dict[str, bool] = {}
     errors: dict[str, str] = {}
@@ -141,8 +155,20 @@ async def stop_all(sensors: list[DotSensor]) -> RecordingResult:
     t0 = time.monotonic()
     timestamps: list[float] = []
 
-    tasks = [_record_one(s, "stop", timestamps) for s in sensors]
-    outcomes = await asyncio.gather(*tasks)
+    # Group sensors by adapter to serialize operations per dongle
+    adapters: dict[str, list[DotSensor]] = {}
+    for s in sensors:
+        key = s.adapter.name if s.adapter else "local"
+        adapters.setdefault(key, []).append(s)
+
+    STAGGER_SEC = 0.02  # 20 ms
+
+    outcomes: list[tuple[bool, str]] = []
+    for adapter_name, group in adapters.items():
+        for s in group:
+            res = await _record_one(s, "stop", timestamps)
+            outcomes.append(res)
+            await asyncio.sleep(STAGGER_SEC)
 
     per_sensor: dict[str, bool] = {}
     errors: dict[str, str] = {}

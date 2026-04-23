@@ -378,7 +378,7 @@ class MainWindow(QMainWindow):
                 )
             elif status == "idle":
                 self._sync_idle_count += 1
-                self._set_row_state(address, "Idle")
+                self._set_row_state(address, "Synced")
                 self._set_status(
                     f"Sync — {self._sync_idle_count}/{self._sync_total} prêts"
                 )
@@ -392,10 +392,11 @@ class MainWindow(QMainWindow):
                 settle_time=2.0,
                 verify_state=False,
                 progress_callback=_on_progress,
+                await_sync_ack=False,
             )
             for s in self._sensors:
                 if result.per_sensor.get(s.address, False):
-                    self._set_row_state(s.address, "Idle")
+                    self._set_row_state(s.address, "Synced")
             ok = sum(result.per_sensor.values())
             color = "#a6e3a1" if result.success else "#f1c40f"
             self._log(

@@ -31,6 +31,7 @@ from .protocol.gatt import (
     SUPPORTED_OUTPUT_RATES, DEFAULT_OUTPUT_RATE,
     DEV_CTRL_OFFSET_OUTPUT_RATE,
     GATT_TIMEOUT, CONNECT_TIMEOUT, CONNECT_RETRIES,
+    MID_RECORDING, MID_SYNC,
 )
 from .protocol.commands import (
     get_state, start_recording, stop_recording, erase_flash,
@@ -226,11 +227,15 @@ class DotSensor:
         response=True  : write with response (GATT ACK BlueZ, plus fiable).
         """
         client = self._require_connected()
+        # Sérialiser les accès GATT par adaptateur
+        adapter_name = self.adapter.bleak_id if self.adapter else "local"
+        sem = _get_adapter_semaphore(adapter_name)
         try:
-            await asyncio.wait_for(
-                client.write_gatt_char(MSG_CONTROL_UUID, data, response=response),
-                timeout=GATT_TIMEOUT,
-            )
+            async with sem:
+                await asyncio.wait_for(
+                    client.write_gatt_char(MSG_CONTROL_UUID, data, response=response),
+                    timeout=GATT_TIMEOUT,
+                )
             logger.debug("[%s] CMD%s → %s", self.name, "(rsp)" if response else "", data.hex())
         except asyncio.TimeoutError:
             raise DotTimeoutError(f"[{self.name}] write_command timeout (data={data.hex()})")
@@ -241,11 +246,14 @@ class DotSensor:
         Retourne (mid, reid, result). Lève DotAckError si result != SUCCESS.
         """
         client = self._require_connected()
+        adapter_name = self.adapter.bleak_id if self.adapter else "local"
+        sem = _get_adapter_semaphore(adapter_name)
         try:
-            raw = await asyncio.wait_for(
-                client.read_gatt_char(MSG_ACK_UUID),
-                timeout=GATT_TIMEOUT,
-            )
+            async with sem:
+                raw = await asyncio.wait_for(
+                    client.read_gatt_char(MSG_ACK_UUID),
+                    timeout=GATT_TIMEOUT,
+                )
         except asyncio.TimeoutError:
             raise DotTimeoutError(f"[{self.name}] read_ack timeout")
 
@@ -279,18 +287,25 @@ class DotSensor:
                                    s'assurer que la commande a bien été reçue avant
                                    de lire l'ACK applicatif.
         """
-        expected_mid = data[0]   # MID_RECORDING=0x01 ou MID_SYNC=0x02
-        await self.write_command(data, response=write_with_response)
+        expected_mid = data[0]   # MID byte en tête du message
+        # Utiliser write-with-response pour les services critiques (Recording / Sync)
+        use_response = write_with_response or (expected_mid in (MID_RECORDING, MID_SYNC))
+        await self.write_command(data, response=use_response)
         if pre_delay > 0.0:
             await asyncio.sleep(pre_delay)
         client = self._require_connected()
+        adapter_name = self.adapter.bleak_id if self.adapter else "local"
+        sem = _get_adapter_semaphore(adapter_name)
         last_raw = b""
+        # Timeout par lecture plus court pour éviter de bloquer longuement la boucle
+        per_read_timeout = min(1.0, GATT_TIMEOUT)
         for attempt in range(retries):
             try:
-                raw = await asyncio.wait_for(
-                    client.read_gatt_char(MSG_ACK_UUID),
-                    timeout=GATT_TIMEOUT,
-                )
+                async with sem:
+                    raw = await asyncio.wait_for(
+                        client.read_gatt_char(MSG_ACK_UUID),
+                        timeout=per_read_timeout,
+                    )
             except asyncio.TimeoutError:
                 raise DotTimeoutError(f"[{self.name}] read_ack timeout")
             raw = bytes(raw)
@@ -330,14 +345,20 @@ class DotSensor:
     async def subscribe_notifications(self) -> None:
         """Active les notifications sur MSG_NOTIFY_UUID."""
         client = self._require_connected()
-        await client.start_notify(MSG_NOTIFY_UUID, self._on_notification)
+        adapter_name = self.adapter.bleak_id if self.adapter else "local"
+        sem = _get_adapter_semaphore(adapter_name)
+        async with sem:
+            await client.start_notify(MSG_NOTIFY_UUID, self._on_notification)
         logger.debug("[%s] Notifications activées.", self.name)
 
     async def unsubscribe_notifications(self) -> None:
         """Désactive les notifications."""
         if self._client and self._client.is_connected:
             try:
-                await self._client.stop_notify(MSG_NOTIFY_UUID)
+                adapter_name = self.adapter.bleak_id if self.adapter else "local"
+                sem = _get_adapter_semaphore(adapter_name)
+                async with sem:
+                    await self._client.stop_notify(MSG_NOTIFY_UUID)
             except Exception:
                 pass
 
@@ -382,10 +403,15 @@ class DotSensor:
         générant des faux positifs permanents ("toujours en Syncing").
         """
         await self.write_command(get_state())
-        raw = await asyncio.wait_for(
-            self._require_connected().read_gatt_char(MSG_ACK_UUID),
-            timeout=GATT_TIMEOUT,
-        )
+        client = self._require_connected()
+        adapter_name = self.adapter.bleak_id if self.adapter else "local"
+        sem = _get_adapter_semaphore(adapter_name)
+        # read under semaphore to serialize with writes
+        async with sem:
+            raw = await asyncio.wait_for(
+                client.read_gatt_char(MSG_ACK_UUID),
+                timeout=GATT_TIMEOUT,
+            )
         raw = bytes(raw)
         logger.debug("[%s] STATE ACK raw ← %s", self.name, raw.hex())
         if len(raw) >= 4:
@@ -412,14 +438,10 @@ class DotSensor:
         Timeout total : ~12s (40 polls × 0.3s).
         """
         logger.info("[%s] STOP RECORDING", self.name)
-        client = self._require_connected()
         data = stop_recording()
         try:
-            await asyncio.wait_for(
-                client.write_gatt_char(MSG_CONTROL_UUID, data, response=False),
-                timeout=GATT_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
+            await self.write_command(data, response=True)
+        except DotTimeoutError:
             raise DotTimeoutError(f"[{self.name}] stop_recording write timeout")
 
         # Attendre ~0.5s que le DOT traite la commande avant de poller
@@ -443,34 +465,28 @@ class DotSensor:
             f"[{self.name}] stop_recording : capteur non en IDLE après 12s (état={state:#04x})"
         )
 
-    async def cmd_send_syncing(self, root_mac: str) -> None:
+    async def cmd_send_syncing(self, root_mac: str, read_ack: bool = True) -> None:
         """
         Envoie la commande de synchronisation réseau et lit l'ACK.
         Un result ≠ 0x00 (ex : 0x06 = rejeté/déjà en Syncing) est loggé
         en warning mais ne lève pas d'exception (le capteur va quand même
         tenter la sync).
+
+        Args:
+            read_ack: si False, n'attend pas l'ACK applicatif après write
+                      (utile pour envoyer la sync au plus simultanément
+                      possible sur plusieurs capteurs).
         """
         logger.info("[%s] SEND SYNCING (root=%s)", self.name, root_mac)
-        await self.write_command(start_syncing(root_mac))
-        # Lire l'ACK de la commande sync — le REID dans l'ACK est le CMD byte
-        # du service sync (0x01 = CMD_START_SYNCING), pas notre REID recording.
-        client = self._require_connected()
+        if not read_ack:
+            await self.write_command(start_syncing(root_mac), response=False)
+            self.state = DotState.SYNCING
+            return
         try:
-            raw = await asyncio.wait_for(
-                client.read_gatt_char(MSG_ACK_UUID),
-                timeout=GATT_TIMEOUT,
-            )
-            raw = bytes(raw)
-            logger.debug("[%s] SYNC ACK raw ← %s", self.name, raw.hex())
-            if len(raw) >= 4:
-                result = raw[3]
-                if result != ACK_RESULT_SUCCESS:
-                    logger.debug(
-                        "[%s] start_syncing ACK result=%#04x (capteur peut-être"
-                        " déjà en Syncing ou sync rejetée)",
-                        self.name, result,
-                    )
-        except asyncio.TimeoutError:
+            await self.send_and_ack(start_syncing(root_mac), write_with_response=True)
+        except DotAckError as exc:
+            logger.warning("[%s] start_syncing ACK erreur : %s", self.name, exc)
+        except DotTimeoutError:
             logger.warning("[%s] start_syncing : pas d'ACK reçu (timeout).", self.name)
         self.state = DotState.SYNCING
 
