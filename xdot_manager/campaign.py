@@ -97,6 +97,7 @@ async def run_reliability_campaign(
     max_per_adapter: int = 8,
     expected_count: Optional[int] = None,
     cooldown: float = 2.0,
+    force_output_rate: Optional[int] = 120,
     event_callback: Optional[Callable[[str], None]] = None,
 ) -> CampaignSummary:
     """Exécute N runs scan→connect→sync→start→stop et retourne un résumé."""
@@ -195,6 +196,17 @@ async def run_reliability_campaign(
 
             if expected_count is not None and connected < expected_count:
                 errors.append(f"count:{connected}/{expected_count}")
+
+            if force_output_rate is not None:
+                _emit(f"Forçage taux acquisition → {force_output_rate} Hz")
+                rate_errors: list[str] = []
+                for s in sensors:
+                    try:
+                        await s.cmd_set_output_rate(force_output_rate)
+                    except Exception as exc:
+                        rate_errors.append(f"rate:{s.address}:{exc}")
+                if rate_errors:
+                    errors.extend(rate_errors)
 
             sync_result = await synchronize_sensors(
                 sensors,

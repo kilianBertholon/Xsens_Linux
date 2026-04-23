@@ -426,6 +426,7 @@ class MainWindow(QMainWindow):
         if not self._sensors:
             self._log("[AVERTISSEMENT] Aucun capteur connecté après purge.")
             return
+        await self._ensure_output_rate(120)
         n = len(self._sensors)
         self._sync_total = n
         self._sync_idle_count = 0
@@ -494,6 +495,7 @@ class MainWindow(QMainWindow):
         if not self._sensors:
             self._log("[AVERTISSEMENT] Aucun capteur connecté après purge.")
             return
+        await self._ensure_output_rate(120)
         self._log("Démarrage de l'enregistrement...")
         self._set_busy(True)
         try:
@@ -588,6 +590,44 @@ class MainWindow(QMainWindow):
         self._set_status(f"Taux d'acquisition : {rate} Hz")
         self._set_busy(False)
         self._refresh_buttons()
+
+    async def _ensure_output_rate(self, target_rate: int = 120) -> bool:
+        """Force le taux d'acquisition cible si nécessaire.
+
+        Retourne True si tout a été appliqué correctement (ou déjà OK).
+        """
+        if not self._sensors:
+            return False
+
+        current_rate = None
+        try:
+            current_rate = int(await self._sensors[0].cmd_get_output_rate())
+        except Exception:
+            pass
+
+        if current_rate == target_rate:
+            return True
+
+        self._log(
+            f"Forçage du taux d'acquisition à <b>{target_rate} Hz</b> "
+            f"(taux courant: {current_rate if current_rate is not None else 'inconnu'})..."
+        )
+        ok_count = 0
+        errors = []
+        for s in self._sensors:
+            try:
+                await s.cmd_set_output_rate(target_rate)
+                ok_count += 1
+            except Exception as exc:
+                errors.append(f"{s.address}: {exc}")
+
+        if ok_count:
+            self._log(
+                f"<span style='color:#a6e3a1'>Taux {target_rate} Hz appliqué à {ok_count}/{len(self._sensors)} capteur(s).</span>"
+            )
+        for err in errors:
+            self._log(f"<span style='color:#f38ba8'>  {err}</span>")
+        return ok_count == len(self._sensors)
 
     async def _flash_info(self) -> None:
         """Interroge la mémoire flash de chaque capteur connecté et ouvre le dialogue."""
@@ -791,6 +831,7 @@ class MainWindow(QMainWindow):
                 max_per_adapter=cfg["max_per_adapter"],
                 expected_count=cfg["expected_count"],
                 cooldown=cfg["cooldown"],
+                force_output_rate=120,
                 event_callback=_cb,
             )
 
