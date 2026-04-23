@@ -220,17 +220,15 @@ class MainWindow(QMainWindow):
         self._btn_sync    = _btn("⟳ Synchroniser",   self._on_sync, "#7c3aed")
         self._btn_rec     = _btn("⏺ Enregistrer",    self._on_start_rec, "#c0392b")
         self._btn_stop    = _btn("⏹ Arrêter",        self._on_stop_rec, "#7f8c8d")
-        self._btn_config  = _btn("⚙ Réglages",       self._on_configure, "#374151")
+        self._btn_tests   = _btn("🧪 Tests",         self._on_tests, "#6d28d9")
         self._btn_flash   = _btn("💽 Flash info",     self._on_flash_info, "#2e4057")
         self._btn_export  = _btn("💾 Exporter",       self._on_export, "#1565c0")
         self._btn_erase   = _btn("🗑 Effacer flash",  self._on_erase, "#b45309")
-        self._btn_analyse = _btn("📊 Analyse sync",   self._on_analyse, "#1a6b4a")
-        self._btn_campaign = _btn("🧪 Campagne",      self._on_campaign, "#6d28d9")
 
         for b in [self._btn_scan, self._btn_connect, self._btn_sync,
-                  self._btn_rec, self._btn_stop, self._btn_config,
+              self._btn_rec, self._btn_stop, self._btn_tests,
                   self._btn_flash, self._btn_export, self._btn_erase,
-                self._btn_analyse, self._btn_campaign]:
+              ]:
             layout.addWidget(b)
 
         layout.addStretch()
@@ -269,12 +267,29 @@ class MainWindow(QMainWindow):
     def _on_start_rec(self)   : asyncio.ensure_future(self._start_recording())
     def _on_stop_rec(self)    : asyncio.ensure_future(self._stop_recording())
     def _on_flash_info(self)  : asyncio.ensure_future(self._flash_info())
-    def _on_configure(self)   : asyncio.ensure_future(self._configure_rate())
+    def _on_tests(self)       : asyncio.ensure_future(self._open_tests_hub())
     def _on_export(self)      : asyncio.ensure_future(self._export_with_dialog())
     def _on_erase(self)       : asyncio.ensure_future(self._erase())
     def _on_analyse(self)     : self._show_jitter_dialog()
     def _on_campaign(self)    : asyncio.ensure_future(self._campaign())
     def _on_refresh_adapters(self): self._refresh_adapter_indicator(log=True)
+
+    async def _open_tests_hub(self) -> None:
+        """Ouvre le hub d'outils de test (campagne, réglages, analyse sync)."""
+        dlg = TestToolsDialog(
+            has_connected=(len(self._sensors) > 0 and not self._recording),
+            has_export=bool(self._last_export_results),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        action = dlg.selected_action()
+        if action == "settings":
+            await self._configure_rate()
+        elif action == "campaign":
+            await self._campaign()
+        elif action == "analysis":
+            self._show_jitter_dialog()
 
     def _refresh_adapter_indicator(self, log: bool = False) -> None:
         """Met à jour l'indicateur visuel des dongles (UP/DOWN + charge)."""
@@ -832,9 +847,8 @@ class MainWindow(QMainWindow):
         Le bouton Arrêter reste actif si l'enregistrement est en cours.
         """
         for b in [self._btn_scan, self._btn_connect, self._btn_sync,
-                  self._btn_rec, self._btn_config, self._btn_flash,
-                self._btn_export, self._btn_erase, self._btn_analyse,
-                self._btn_campaign, self._btn_refresh_adapters]:
+                                    self._btn_rec, self._btn_tests, self._btn_flash,
+                                    self._btn_export, self._btn_erase, self._btn_refresh_adapters]:
             b.setEnabled(not busy)
         # btn_stop : actif si enregistrement en cours, même pendant busy
         self._btn_stop.setEnabled(self._recording)
@@ -867,12 +881,11 @@ class MainWindow(QMainWindow):
         self._btn_sync.setEnabled(connected and not self._recording)
         self._btn_rec.setEnabled(connected and not self._recording)
         self._btn_stop.setEnabled(connected and self._recording)
-        self._btn_config.setEnabled(connected and not self._recording)
+        self._btn_tests.setEnabled(not self._recording)
         self._btn_flash.setEnabled(connected and not self._recording)
         self._btn_export.setEnabled(connected and not self._recording)
         self._btn_erase.setEnabled(connected and not self._recording)
-        self._btn_analyse.setEnabled(has_export)
-        self._btn_campaign.setEnabled(not self._recording)
+        self._btn_refresh_adapters.setEnabled(True)
 
     # ── Analyse jitter ────────────────────────────────────────────────────
 
@@ -1220,6 +1233,60 @@ class CampaignSettingsDialog(QDialog):
             "expected_count": int(expected) if expected > 0 else None,
             "max_per_adapter": int(self._max_per_adapter.value()),
         }
+
+
+class TestToolsDialog(QDialog):
+    """Hub GUI des outils de test."""
+
+    def __init__(self, has_connected: bool, has_export: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("🧪 Outils de test")
+        self.setMinimumWidth(360)
+        self._action: Optional[str] = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "Choisir une action de test :\n"
+            "- Campagne fiabilité\n"
+            "- Réglages (fréquence)\n"
+            "- Analyse synchronisation"
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        btn_campaign = QPushButton("🧪 Campagne fiabilité")
+        btn_campaign.setToolTip("Runs répétés scan→sync→record→stop avec résumé")
+        btn_campaign.clicked.connect(lambda: self._choose("campaign"))
+        layout.addWidget(btn_campaign)
+
+        btn_settings = QPushButton("⚙ Réglages acquisition")
+        btn_settings.setToolTip("Configurer le taux d'acquisition (ex: 120 Hz)")
+        btn_settings.setEnabled(has_connected)
+        if not has_connected:
+            btn_settings.setToolTip("Nécessite au moins un capteur connecté")
+        btn_settings.clicked.connect(lambda: self._choose("settings"))
+        layout.addWidget(btn_settings)
+
+        btn_analysis = QPushButton("📊 Analyse sync")
+        btn_analysis.setToolTip("Analyse le jitter sur le dernier export")
+        btn_analysis.setEnabled(has_export)
+        if not has_export:
+            btn_analysis.setToolTip("Nécessite un export déjà réalisé")
+        btn_analysis.clicked.connect(lambda: self._choose("analysis"))
+        layout.addWidget(btn_analysis)
+
+        close_btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_btns.rejected.connect(self.reject)
+        layout.addWidget(close_btns)
+
+    def _choose(self, action: str) -> None:
+        self._action = action
+        self.accept()
+
+    def selected_action(self) -> Optional[str]:
+        return self._action
 
 
 # ── Dialogue d'export ─────────────────────────────────────────────────────────
