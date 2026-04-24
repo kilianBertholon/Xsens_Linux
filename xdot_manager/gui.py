@@ -290,15 +290,15 @@ class MainWindow(QMainWindow):
     def _on_stop_rec(self)    : asyncio.ensure_future(self._stop_recording())
     def _on_disconnect_selected(self): asyncio.ensure_future(self._disconnect_selected())
     def _on_flash_info(self)  : asyncio.ensure_future(self._flash_info())
-    def _on_tests(self)       : asyncio.ensure_future(self._open_tests_hub())
+    def _on_tests(self)       : self._show_tests_dialog_sync()
     def _on_export(self)      : asyncio.ensure_future(self._export_with_dialog())
     def _on_erase(self)       : asyncio.ensure_future(self._erase())
     def _on_analyse(self)     : self._show_jitter_dialog()
     def _on_campaign(self)    : asyncio.ensure_future(self._campaign())
     def _on_refresh_adapters(self): self._refresh_adapter_indicator(log=True)
 
-    async def _open_tests_hub(self) -> None:
-        """Ouvre le hub d'outils de test (campagne, réglages, analyse sync)."""
+    def _show_tests_dialog_sync(self) -> None:
+        """Affiche le dialogue des outils de test (synchrone) et lance l'action correspondante."""
         dlg = TestToolsDialog(
             has_connected=(len(self._sensors) > 0 and not self._recording),
             has_export=bool(self._last_export_results),
@@ -307,10 +307,14 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         action = dlg.selected_action()
+        # Lancer l'action correspondante de manière async
+        asyncio.ensure_future(self._execute_tests_action(action))
+
+    async def _execute_tests_action(self, action: str) -> None:
+        """Exécute l'action sélectionnée (async)."""
         if action == "preflight":
             await self._show_preflight()
-            return
-        if action == "settings":
+        elif action == "settings":
             await self._configure_rate()
         elif action == "campaign":
             await self._campaign()
