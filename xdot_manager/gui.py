@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from statistics import mean
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent, QColor, QFont, QIcon, QPainter, QPen
@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         self._lbl_status = QLabel("Prêt — aucun capteur connecté")
         self._lbl_timer  = QLabel("")
         sb = self.statusBar()
+        assert sb is not None
         sb.addWidget(self._lbl_status, 1)
         sb.addPermanentWidget(self._lbl_timer)
 
@@ -270,12 +271,16 @@ class MainWindow(QMainWindow):
     def _make_table(self) -> QTableWidget:
         t = QTableWidget(0, len(_COLS))
         t.setHorizontalHeaderLabels(_COLS)
-        t.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        t.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header = t.horizontalHeader()
+        assert header is not None
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         t.setAlternatingRowColors(True)
-        t.verticalHeader().setVisible(False)
+        vheader = t.verticalHeader()
+        assert vheader is not None
+        vheader.setVisible(False)
         t.setColumnWidth(0, 32)
         t.setColumnWidth(4, 80)
         t.setColumnWidth(5, 120)
@@ -1009,16 +1014,18 @@ class MainWindow(QMainWindow):
             self._set_row_state(s.address, "Exporting")
         try:
             from .export import get_flash_metadata
+            from .export import FileMetadata
             tasks = {s.address: get_flash_metadata(s) for s in self._sensors}
             results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-            new_meta: dict[str, list] = {}
+            new_meta: dict[str, list[FileMetadata]] = {}
             for addr, res in zip(tasks.keys(), results):
                 if isinstance(res, Exception):
                     self._log(f"  <span style='color:#f38ba8'>{addr} — erreur : {res}</span>")
                     new_meta[addr] = []
                 else:
-                    new_meta[addr] = res
-                    self._log(f"  {addr} — {len(res)} fichier(s) trouvé(s)")
+                    files = cast(list[FileMetadata], res)
+                    new_meta[addr] = files
+                    self._log(f"  {addr} — {len(files)} fichier(s) trouvé(s)")
                 self._set_row_state(addr, "Idle")
 
             # Lire le taux d'acquisition courant par capteur.
@@ -1593,12 +1600,16 @@ class FlashInfoDialog(QDialog):
         cols = ["Adresse", "Fichier", "Nb samples", "Durée estimée", "Début (UTC)"]
         table = QTableWidget(0, len(cols))
         table.setHorizontalHeaderLabels(cols)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header = table.horizontalHeader()
+        assert header is not None
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setAlternatingRowColors(True)
-        table.verticalHeader().setVisible(False)
+        vheader = table.verticalHeader()
+        assert vheader is not None
+        vheader.setVisible(False)
 
         for sensor in sensors:
             meta_list = flash_meta.get(sensor.address, [])
