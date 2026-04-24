@@ -127,6 +127,15 @@ class DotSensor:
         self.battery_level: Optional[int] = None
         self.on_disconnected: Optional[Callable[["DotSensor"], None]] = None
 
+
+    def _check_disconnect_error(self, exc: Exception) -> None:
+        "Détecte une déconnexion silencieuse sur erreur GATT."
+        err_msg = str(exc).lower()
+        if "not connected" in err_msg or "unreachable" in err_msg or "unlikely error" in err_msg:
+            if self.state != DotState.DISCONNECTED:
+                logger.warning("[%s] Erreur GATT fatale détectée (%s) -> Force déconnexion.", self.name, exc)
+                self._bleak_disconnected_cb(self._client)
+
     def _bleak_disconnected_cb(self, client: BleakClient) -> None:
         """Callback interne de Bleak en cas de déconnexion."""
         if self.state != DotState.DISCONNECTED:
@@ -230,7 +239,8 @@ class DotSensor:
     @property
     def is_active(self) -> bool:
         """Indique si le capteur est en cours d'utilisation ou en tentative de connexion."""
-        return self.state in (DotState.CONNECTING, DotState.CONNECTED, DotState.SYNCING, DotState.RECORDING, DotState.EXPORTING)
+        active_state = self.state in (DotState.CONNECTING, DotState.CONNECTED, DotState.SYNCING, DotState.RECORDING, DotState.EXPORTING)
+        return active_state and getattr(self._client, 'is_connected', False) if self.state != DotState.CONNECTING else active_state
 
     # ------------------------------------------------------------------
     # Primitives GATT bas niveau
@@ -259,6 +269,9 @@ class DotSensor:
             logger.debug("[%s] CMD%s → %s", self.name, "(rsp)" if response else "", data.hex())
         except asyncio.TimeoutError:
             raise DotTimeoutError(f"[{self.name}] write_command timeout (data={data.hex()})")
+        except (BleakError, OSError) as exc:
+            self._check_disconnect_error(exc)
+            raise
 
     async def read_ack(self) -> tuple[int, int, int]:
         """
@@ -276,6 +289,9 @@ class DotSensor:
                 )
         except asyncio.TimeoutError:
             raise DotTimeoutError(f"[{self.name}] read_ack timeout")
+        except (BleakError, OSError) as exc:
+            self._check_disconnect_error(exc)
+            raise
 
         logger.debug("[%s] ACK ← %s", self.name, raw.hex())
         mid, reid, result = parse_ack(bytes(raw))
@@ -427,11 +443,17 @@ class DotSensor:
         adapter_name = self.adapter.bleak_id if self.adapter else "local"
         sem = _get_adapter_semaphore(adapter_name)
         # read under semaphore to serialize with writes
-        async with sem:
-            raw = await asyncio.wait_for(
-                client.read_gatt_char(MSG_ACK_UUID),
-                timeout=GATT_TIMEOUT,
-            )
+        try:
+            async with sem:
+                raw = await asyncio.wait_for(
+                    client.read_gatt_char(MSG_ACK_UUID),
+                    timeout=GATT_TIMEOUT,
+                )
+        except asyncio.TimeoutError:
+            raise DotTimeoutError(f"[{self.name}] cmd_get_state timeout")
+        except (BleakError, OSError) as exc:
+            self._check_disconnect_error(exc)
+            raise DotConnectError(f"Erreur GATT (Not connected): {exc}")
         raw = bytes(raw)
         logger.debug("[%s] STATE ACK raw ← %s", self.name, raw.hex())
         if len(raw) >= 4:
@@ -536,6 +558,9 @@ class DotSensor:
             )
         except asyncio.TimeoutError:
             raise DotTimeoutError(f"[{self.name}] set_output_rate timeout")
+        except (BleakError, OSError) as exc:
+            self._check_disconnect_error(exc)
+            raise
 
     async def cmd_get_output_rate(self) -> int:
         """
@@ -557,6 +582,9 @@ class DotSensor:
             return DEFAULT_OUTPUT_RATE
         except asyncio.TimeoutError:
             raise DotTimeoutError(f"[{self.name}] get_output_rate timeout")
+        except (BleakError, OSError) as exc:
+            self._check_disconnect_error(exc)
+            raise DotConnectError(f"Erreur GATT: {exc}")
 
     async def cmd_erase_flash(self, poll_interval: float = 2.0, timeout: float = 300.0) -> None:
         """
@@ -603,6 +631,7 @@ class DotSensor:
             self.battery_level = val
             return val
         except Exception as exc:
+            self._check_disconnect_error(exc)
             logger.debug("[%s] Impossible de lire la batterie : %s", self.name, exc)
             return None
 
