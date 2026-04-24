@@ -98,6 +98,10 @@ QFrame#toolbar {
 }
 """
 
+# Sûreté : garder une marge par dongle pour éviter les congestions BLE.
+_SAFE_SENSORS_PER_ADAPTER = 6
+_WARN_SENSORS_PER_ADAPTER = 5
+
 
 @dataclass
 class PreflightResult:
@@ -335,6 +339,32 @@ class MainWindow(QMainWindow):
 
         details.append(("Capteurs connectés", f"{len(self._sensors)}", "ok"))
 
+        loads_by_adapter: dict[str, int] = {}
+        for s in self._sensors:
+            if s.adapter:
+                loads_by_adapter[s.adapter.name] = loads_by_adapter.get(s.adapter.name, 0) + 1
+
+        overloaded_adapters: list[str] = []
+        cautious_adapters: list[str] = []
+        for adapter_name, load in sorted(loads_by_adapter.items()):
+            if load > _SAFE_SENSORS_PER_ADAPTER:
+                overloaded_adapters.append(f"{adapter_name}={load}")
+                details.append((
+                    adapter_name,
+                    f"{load} capteur(s) — surcharge (max {_SAFE_SENSORS_PER_ADAPTER})",
+                    "err",
+                ))
+                ok = False
+            elif load >= _WARN_SENSORS_PER_ADAPTER:
+                cautious_adapters.append(f"{adapter_name}={load}")
+                details.append((
+                    adapter_name,
+                    f"{load} capteur(s) — zone prudente",
+                    "warn",
+                ))
+            else:
+                details.append((adapter_name, f"{load} capteur(s)", "ok"))
+
         rate = None
         try:
             rate = int(await self._sensors[0].cmd_get_output_rate())
@@ -374,9 +404,13 @@ class MainWindow(QMainWindow):
             f"{len(self._sensors)} capteur(s), {up_count} dongle(s) UP, "
             f"taux cible 120 Hz{' (déjà OK)' if rate == 120 else ''}."
         )
+        if overloaded_adapters:
+            summary += f" Surcharge dongle: {', '.join(overloaded_adapters)}."
+        elif cautious_adapters:
+            summary += f" Charge élevée: {', '.join(cautious_adapters)}."
         if idle_warn:
             summary += " Certains capteurs ne sont pas Idle."
-        return PreflightResult(ok=ok and idle_warn == 0, summary=summary, details=details)
+        return PreflightResult(ok=ok and idle_warn == 0 and not overloaded_adapters, summary=summary, details=details)
 
     def _log_preflight_result(self, result: PreflightResult) -> None:
         self._log("─── Préflight ──────────────────────────────────────")
@@ -423,21 +457,48 @@ class MainWindow(QMainWindow):
 
         parts: list[str] = []
         tips: list[str] = []
+        overloaded: list[str] = []
+        cautious: list[str] = []
         for a in adapters:
-            icon = "🟢" if a.is_up else "🔴"
             sc = scanned_by_adapter.get(a.name, 0)
             cc = connected_by_adapter.get(a.name, 0)
+            if cc > _SAFE_SENSORS_PER_ADAPTER:
+                icon = "🔴"
+                overloaded.append(f"{a.name}={cc}")
+            elif cc >= _WARN_SENSORS_PER_ADAPTER:
+                icon = "🟡"
+                cautious.append(f"{a.name}={cc}")
+            else:
+                icon = "🟢" if a.is_up else "🔴"
             parts.append(f"{icon}<b>{a.name}</b> {cc}/{sc}")
             tips.append(
                 f"{a.name} [{a.address}] — {'UP' if a.is_up else 'DOWN'} — "
-                f"connectés={cc}, scannés={sc}"
+                f"connectés={cc}, scannés={sc}, seuil sûr={_SAFE_SENSORS_PER_ADAPTER}"
             )
+            if cc > _SAFE_SENSORS_PER_ADAPTER:
+                tips.append(
+                    f"⚠ {a.name} dépasse le seuil sûr : {cc} capteurs connectés "
+                    f"(max recommandé {_SAFE_SENSORS_PER_ADAPTER})."
+                )
+            elif cc >= _WARN_SENSORS_PER_ADAPTER:
+                tips.append(
+                    f"⚠ {a.name} approche de la limite de sûreté : {cc} capteurs "
+                    f"(recommandé ≤ {_WARN_SENSORS_PER_ADAPTER})."
+                )
 
         detail = "  ".join(parts) if parts else "—"
         self._lbl_adapters.setText(f"Dongles : <b>{up_count}/{total}</b> UP  |  {detail}")
         self._lbl_adapters.setToolTip("\n".join(tips) if tips else "Aucun dongle détecté")
         if log:
             self._log(f"Dongles : {up_count}/{total} UP")
+            if overloaded:
+                self._log(
+                    f"<span style='color:#f38ba8'>[ALERTE] Surcharge dongle : {', '.join(overloaded)}</span>"
+                )
+            elif cautious:
+                self._log(
+                    f"<span style='color:#f1c40f'>[AVERTISSEMENT] Charge élevée : {', '.join(cautious)}</span>"
+                )
 
     # ── Logique async ─────────────────────────────────────────────────────
 
