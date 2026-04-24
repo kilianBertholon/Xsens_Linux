@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .adapters import list_adapters, print_adapter_summary
+from .adapters import list_adapters, print_adapter_summary, SAFE_DEFAULT_MAX_PER_ADAPTER
 from .scanner import scan_for_dots, print_scan_results, DotDevice
 from .sensor import DotSensor, DotError, DotConnectError
 from .sync import synchronize_sensors, SyncResult
@@ -307,9 +307,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan = sub.add_parser("scan", help="Scanner les capteurs Xsens DOT")
     p_scan.add_argument("--timeout", type=float, default=5.0,
                         help="Durée du scan BLE en secondes (défaut : 5)")
-    p_scan.add_argument("--max-per-adapter", type=int, default=8,
+    p_scan.add_argument("--max-per-adapter", type=int, default=SAFE_DEFAULT_MAX_PER_ADAPTER,
                         dest="max_per_adapter",
-                        help="Nombre max de capteurs par adaptateur (défaut : 8)")
+                        help=f"Nombre max de capteurs par adaptateur (défaut : {SAFE_DEFAULT_MAX_PER_ADAPTER})")
 
     # record
     p_rec = sub.add_parser("record", help="Synchroniser et enregistrer")
@@ -318,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rec.add_argument("--scan-timeout", type=float, default=5.0,
                        dest="scan_timeout",
                        help="Durée du scan initial (défaut : 5)")
-    p_rec.add_argument("--max-per-adapter", type=int, default=8,
+    p_rec.add_argument("--max-per-adapter", type=int, default=SAFE_DEFAULT_MAX_PER_ADAPTER,
                        dest="max_per_adapter")
 
     # export
@@ -329,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Type de données à exporter (défaut : euler)")
     p_exp.add_argument("--scan-timeout", type=float, default=5.0,
                        dest="scan_timeout")
-    p_exp.add_argument("--max-per-adapter", type=int, default=8,
+    p_exp.add_argument("--max-per-adapter", type=int, default=SAFE_DEFAULT_MAX_PER_ADAPTER,
                        dest="max_per_adapter")
 
     # full
@@ -342,7 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Type de données (défaut : euler)")
     p_full.add_argument("--scan-timeout", type=float, default=5.0,
                         dest="scan_timeout")
-    p_full.add_argument("--max-per-adapter", type=int, default=8,
+    p_full.add_argument("--max-per-adapter", type=int, default=SAFE_DEFAULT_MAX_PER_ADAPTER,
                         dest="max_per_adapter")
 
     # campaign
@@ -362,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_campaign.add_argument("--expected-count", type=int, default=None,
                             dest="expected_count",
                             help="Nombre attendu de capteurs connectés (sinon run KO)")
-    p_campaign.add_argument("--max-per-adapter", type=int, default=8,
+    p_campaign.add_argument("--max-per-adapter", type=int, default=SAFE_DEFAULT_MAX_PER_ADAPTER,
                             dest="max_per_adapter")
 
     return parser

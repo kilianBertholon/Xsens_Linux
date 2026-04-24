@@ -18,7 +18,12 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-from .adapters import BtAdapter, list_adapters, assign_sensors_round_robin
+from .adapters import (
+    BtAdapter,
+    list_adapters,
+    assign_sensors_round_robin,
+    SAFE_DEFAULT_MAX_PER_ADAPTER,
+)
 from .protocol.gatt import DOT_NAMES
 
 logger = logging.getLogger(__name__)
@@ -94,7 +99,7 @@ async def _scan_one_adapter(
 async def scan_for_dots(
     timeout: float = 5.0,
     adapters: Optional[list[BtAdapter]] = None,
-    max_per_adapter: int = 8,
+    max_per_adapter: int = SAFE_DEFAULT_MAX_PER_ADAPTER,
 ) -> list[DotDevice]:
     """
     Scan BLE en parallèle sur tous les adaptateurs disponibles.

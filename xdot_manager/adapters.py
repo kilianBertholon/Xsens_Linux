@@ -21,6 +21,17 @@ from pathlib import Path
 from typing import Iterator
 
 
+# Valeur de prudence par défaut pour éviter de pousser un dongle trop haut.
+SAFE_DEFAULT_MAX_PER_ADAPTER = 6
+
+
+def recommended_max_per_adapter(adapter_count: int) -> int:
+    """Retourne une capacité de connexion conservatrice par adaptateur."""
+    if adapter_count <= 1:
+        return 4
+    return SAFE_DEFAULT_MAX_PER_ADAPTER
+
+
 # ---------------------------------------------------------------------------
 # Dataclass
 # ---------------------------------------------------------------------------
@@ -182,7 +193,7 @@ def list_adapters(include_down: bool = False) -> list[BtAdapter]:
 def assign_sensors_round_robin(
     sensor_addresses: list[str],
     adapters: list[BtAdapter],
-    max_per_adapter: int = 8,
+    max_per_adapter: int = SAFE_DEFAULT_MAX_PER_ADAPTER,
 ) -> dict[str, BtAdapter]:
     """
     Répartit les capteurs entre les adaptateurs disponibles en round-robin.

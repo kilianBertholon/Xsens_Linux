@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 import qasync
 
-from .adapters import list_adapters
+from .adapters import list_adapters, recommended_max_per_adapter
 from .protocol.gatt import STATE_NAMES, STATE_IDLE, STATE_RECORDING, STATE_ERASING
 from .scanner import scan_for_dots
 from .sensor import DotSensor, DotConnectError, DotError
@@ -1566,7 +1566,9 @@ class CampaignSettingsDialog(QDialog):
 
         self._max_per_adapter = QSpinBox()
         self._max_per_adapter.setRange(1, 32)
-        self._max_per_adapter.setValue(8)
+        self._max_per_adapter.setValue(
+            recommended_max_per_adapter(len(list_adapters(include_down=True)))
+        )
         _row("Max/adaptateur :", self._max_per_adapter)
 
         btns = QDialogButtonBox(

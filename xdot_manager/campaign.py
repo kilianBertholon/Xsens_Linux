@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from statistics import mean
 from typing import Callable, Optional
 
-from .adapters import list_adapters
+from .adapters import list_adapters, SAFE_DEFAULT_MAX_PER_ADAPTER
 from .scanner import scan_for_dots
 from .sensor import DotSensor, DotConnectError
 from .sync import synchronize_sensors
@@ -94,7 +94,7 @@ async def run_reliability_campaign(
     runs: int = 5,
     duration: float = 10.0,
     scan_timeout: float = 8.0,
-    max_per_adapter: int = 8,
+    max_per_adapter: int = SAFE_DEFAULT_MAX_PER_ADAPTER,
     expected_count: Optional[int] = None,
     cooldown: float = 2.0,
     force_output_rate: Optional[int] = 120,
