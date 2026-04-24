@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
 
         self._devices: list = []          # résultats du scan
         self._sensors: list[DotSensor] = []
+        self._recording_sensors: list[DotSensor] = []
         self._recording = False
         self._is_busy = False
         self._recording_start: Optional[datetime] = None
@@ -312,7 +313,7 @@ class MainWindow(QMainWindow):
         elif action == "analysis":
             self._show_jitter_dialog()
 
-    async def _run_preflight(self) -> PreflightResult:
+    async def _run_preflight(self, sensors: Optional[list[DotSensor]] = None) -> PreflightResult:
         """Exécute un contrôle préalable détaillé.
 
         Vérifie : dongles, capteurs, fréquence 120 Hz, état Idle.
@@ -320,6 +321,7 @@ class MainWindow(QMainWindow):
         details: list[tuple[str, str, str]] = []
         ok = True
         up_count = 0
+        check_sensors = sensors if sensors is not None else self._sensors
 
         try:
             adapters = list_adapters(include_down=True)
@@ -332,15 +334,15 @@ class MainWindow(QMainWindow):
             ok = False
 
         self._purge_disconnected()
-        if not self._sensors:
+        if not check_sensors:
             details.append(("Capteurs connectés", "0", "err"))
             ok = False
             return PreflightResult(ok=False, summary="Aucun capteur connecté.", details=details)
 
-        details.append(("Capteurs connectés", f"{len(self._sensors)}", "ok"))
+        details.append(("Capteurs connectés", f"{len(check_sensors)}", "ok"))
 
         loads_by_adapter: dict[str, int] = {}
-        for s in self._sensors:
+        for s in check_sensors:
             if s.adapter:
                 loads_by_adapter[s.adapter.name] = loads_by_adapter.get(s.adapter.name, 0) + 1
 
@@ -367,7 +369,7 @@ class MainWindow(QMainWindow):
 
         rate = None
         try:
-            rate = int(await self._sensors[0].cmd_get_output_rate())
+            rate = int(await check_sensors[0].cmd_get_output_rate())
         except Exception as exc:
             details.append(("Taux acquisition", f"Lecture impossible: {exc}", "warn"))
         else:
@@ -379,7 +381,7 @@ class MainWindow(QMainWindow):
         idle_ok = 0
         idle_warn = 0
         state_errors = 0
-        for s in self._sensors:
+        for s in check_sensors:
             try:
                 st = await s.cmd_get_state()
                 state_name = STATE_NAMES.get(st, f"0x{st:02x}")
@@ -398,10 +400,10 @@ class MainWindow(QMainWindow):
         elif idle_warn == 0:
             details.append(("État capteurs", "Tous en Idle", "ok"))
         else:
-            details.append(("État capteurs", f"{idle_ok}/{len(self._sensors)} en Idle", "warn"))
+            details.append(("État capteurs", f"{idle_ok}/{len(check_sensors)} en Idle", "warn"))
 
         summary = (
-            f"{len(self._sensors)} capteur(s), {up_count} dongle(s) UP, "
+            f"{len(check_sensors)} capteur(s), {up_count} dongle(s) UP, "
             f"taux cible 120 Hz{' (déjà OK)' if rate == 120 else ''}."
         )
         if overloaded_adapters:
@@ -499,6 +501,49 @@ class MainWindow(QMainWindow):
                 self._log(
                     f"<span style='color:#f1c40f'>[AVERTISSEMENT] Charge élevée : {', '.join(cautious)}</span>"
                 )
+
+    def _select_operation_sensors(self) -> list[DotSensor]:
+        """Sélectionne automatiquement un sous-ensemble stable en cas de surcharge.
+
+        Stratégie : garder les capteurs au RSSI le plus élevé par adaptateur,
+        avec plafond `_SAFE_SENSORS_PER_ADAPTER`.
+        """
+        if not self._sensors:
+            return []
+
+        by_adapter: dict[str, list[DotSensor]] = {}
+        for sensor in self._sensors:
+            adapter_name = sensor.adapter.name if sensor.adapter else "?"
+            by_adapter.setdefault(adapter_name, []).append(sensor)
+
+        rssi_by_addr = {d.address.upper(): d.rssi for d in self._devices}
+        selected: list[DotSensor] = []
+        skipped: list[str] = []
+
+        for adapter_name, group in sorted(by_adapter.items()):
+            ordered = sorted(
+                group,
+                key=lambda sensor: rssi_by_addr.get(sensor.address.upper(), -127),
+                reverse=True,
+            )
+            keep = ordered[:_SAFE_SENSORS_PER_ADAPTER]
+            drop = ordered[_SAFE_SENSORS_PER_ADAPTER:]
+            selected.extend(keep)
+            skipped.extend([sensor.address for sensor in drop])
+
+            if drop:
+                self._log(
+                    f"<span style='color:#f1c40f'>[MODE DÉGRADÉ] {adapter_name}: "
+                    f"{len(keep)}/{len(group)} capteur(s) retenu(s) (RSSI prioritaire).</span>"
+                )
+
+        if skipped:
+            self._log(
+                f"<span style='color:#f1c40f'>[MODE DÉGRADÉ] Capteurs temporairement exclus des opérations: "
+                f"{', '.join(skipped)}</span>"
+            )
+
+        return selected
 
     # ── Logique async ─────────────────────────────────────────────────────
 
@@ -638,15 +683,20 @@ class MainWindow(QMainWindow):
         if not self._sensors:
             self._log("[AVERTISSEMENT] Aucun capteur connecté après purge.")
             return
+
+        op_sensors = self._select_operation_sensors()
+        if not op_sensors:
+            self._log("<span style='color:#f38ba8'>[ERREUR] Aucun capteur exploitable pour la sync.</span>")
+            return
         
-        preflight = await self._run_preflight()
+        preflight = await self._run_preflight(op_sensors)
         self._log_preflight_result(preflight)
         if not preflight.ok:
             self._log("<span style='color:#f38ba8'>[ERREUR] Échec du contrôle avant-vol (Preflight). Veuillez déconnecter le capteur en erreur ou attendre sa reconnexion automatique.</span>")
             return
             
         await self._ensure_output_rate(120)
-        n = len(self._sensors)
+        n = len(op_sensors)
         self._sync_total = n
         self._sync_idle_count = 0
         self._sync_synced_count = 0
@@ -676,13 +726,13 @@ class MainWindow(QMainWindow):
         try:
             from .sync import synchronize_sensors
             result = await synchronize_sensors(
-                self._sensors,
+                op_sensors,
                 settle_time=2.0,
                 verify_state=False,
                 progress_callback=_on_progress,
                 await_sync_ack=False,
             )
-            for s in self._sensors:
+            for s in op_sensors:
                 if result.per_sensor.get(s.address, False):
                     self._set_row_state(s.address, "Synced")
             ok = sum(result.per_sensor.values())
@@ -715,7 +765,12 @@ class MainWindow(QMainWindow):
             self._log("[AVERTISSEMENT] Aucun capteur connecté après purge.")
             return
 
-        preflight = await self._run_preflight()
+        op_sensors = self._select_operation_sensors()
+        if not op_sensors:
+            self._log("<span style='color:#f38ba8'>[ERREUR] Aucun capteur exploitable pour l'enregistrement.</span>")
+            return
+
+        preflight = await self._run_preflight(op_sensors)
         if not preflight.ok:
             self._log_preflight_result(preflight)
             self._log("<span style='color:#f38ba8'>[ERREUR] Impossible de lancer l'enregistrement. Veuillez déconnecter le capteur en erreur ou attendre sa reconnexion automatique.</span>")
@@ -726,20 +781,21 @@ class MainWindow(QMainWindow):
         self._set_busy(True)
         try:
             from .recording import start_all
-            result = await start_all(self._sensors)
+            result = await start_all(op_sensors)
             self._recording = True
+            self._recording_sensors = list(op_sensors)
             self._recording_start = datetime.now()
             self._timer.start(1000)
-            for s in self._sensors:
+            for s in op_sensors:
                 self._set_row_state(s.address, "Recording")
             jitter_info = ""
             if result.jitter_ms is not None:
                 jitter_info = f" — jitter ACK : <b>{result.jitter_ms:.1f} ms</b>"
             self._log(
                 f"<span style='color:#f38ba8'>⏺ Enregistrement démarré</span>"
-                f" — {len(self._sensors)} capteur(s){jitter_info}"
+                f" — {len(op_sensors)} capteur(s){jitter_info}"
             )
-            self._set_status(f"Enregistrement — {len(self._sensors)} capteur(s)")
+            self._set_status(f"Enregistrement — {len(op_sensors)} capteur(s)")
         except Exception as exc:
             self._log(f"<span style='color:#f38ba8'>[ERREUR recording] {exc}</span>")
         finally:
@@ -755,19 +811,21 @@ class MainWindow(QMainWindow):
         self._recording = False
         self._log("Arrêt de l'enregistrement...")
         self._set_busy(True)
+        to_stop = [s for s in self._recording_sensors if s.is_active] or [s for s in self._sensors if s.is_active]
         try:
             from .recording import stop_all
-            result = await stop_all(self._sensors)
+            result = await stop_all(to_stop)
             self._recording = False
             self._timer.stop()
             self._lbl_timer.setText("")
-            for s in self._sensors:
+            for s in to_stop:
                 self._set_row_state(s.address, "Idle")
             self._log(f"<span style='color:#a6e3a1'>⏹ Enregistrement arrêté</span> — {result}")
             self._set_status("Arrêté")
         except Exception as exc:
             self._log(f"<span style='color:#f38ba8'>[ERREUR stop] {exc}</span>")
         finally:
+            self._recording_sensors = []
             # Purger les capteurs qui se sont déconnectés pendant l'enregistrement
             self._purge_disconnected()
             self._set_busy(False)
@@ -818,6 +876,7 @@ class MainWindow(QMainWindow):
 
             # Retirer de la liste active les capteurs effectivement déconnectés
             self._sensors = [s for s in self._sensors if s.is_active]
+            self._recording_sensors = [s for s in self._recording_sensors if s.is_active]
 
             self._log(f"<span style='color:#a6e3a1'>Déconnectés : {disconnected}/{len(targets)}</span>")
             self._set_status(f"{len(self._sensors)} connecté(s)")
@@ -1215,6 +1274,7 @@ class MainWindow(QMainWindow):
             for s in lost:
                 self._set_row_state(s.address, "ERREUR")
             self._sensors = [s for s in self._sensors if s.is_active]
+            self._recording_sensors = [s for s in self._recording_sensors if s.is_active]
             self._refresh_adapter_indicator()
             self._refresh_buttons()
         return len(lost)
