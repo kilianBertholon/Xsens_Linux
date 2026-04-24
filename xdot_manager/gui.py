@@ -1258,10 +1258,12 @@ class MainWindow(QMainWindow):
                     pass
 
     def _set_row_state(self, address: str, state: str) -> None:
+        key = address.upper()
         for row in range(self._table.rowCount()):
             item = self._table.item(row, 1)
-            if item and item.text() == address:
+            if item and item.text().upper() == key:
                 self._table.setItem(row, 6, _state_cell(state))
+                self._table.setItem(row, 7, self._health_score_cell(key))
                 break
 
     def _set_row_battery(self, address: str, level: int) -> None:
@@ -1326,8 +1328,26 @@ class MainWindow(QMainWindow):
         key = self._health_key(address)
         h = self._sensor_health.get(key)
 
+        state = "—"
+        for row in range(self._table.rowCount()):
+            mac_item = self._table.item(row, 1)
+            if mac_item and mac_item.text().upper() == key:
+                state_item = self._table.item(row, 6)
+                if state_item:
+                    state = state_item.text()
+                break
+
+        if state in ("—", "ERREUR"):
+            text = "Hors ligne" if state == "—" else "Erreur liaison"
+            color = "#6c7086" if state == "—" else "#e74c3c"
+            cell = QTableWidgetItem(text)
+            cell.setToolTip(f"{key}\nÉtat: {state}")
+            cell.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+            cell.setForeground(QColor(color))
+            return cell
+
         if not h:
-            cell = QTableWidgetItem("100% OK")
+            cell = QTableWidgetItem("100/100 OK")
             cell.setToolTip("Aucun incident enregistré")
             cell.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
             cell.setForeground(QColor("#27ae60"))
@@ -1339,19 +1359,19 @@ class MainWindow(QMainWindow):
         score = max(0, 100 - (drops * 15) - (reconnect_fail * 35))
 
         if score >= 95:
-            text = f"{score:3d}% OK"
+            text = f"{score:3d}/100 OK"
             color = "#27ae60"
         elif score >= 80:
-            text = f"{score:3d}% Vigilance"
+            text = f"{score:3d}/100 Vigilance"
             color = "#f39c12"
         elif score >= 60:
-            text = f"{score:3d}% Instable"
+            text = f"{score:3d}/100 Instable"
             color = "#e67e22"
         elif score >= 30:
-            text = f"{score:3d}% Problème"
+            text = f"{score:3d}/100 Problème"
             color = "#e74c3c"
         else:
-            text = f"{score:3d}% Critique"
+            text = f"{score:3d}/100 Critique"
             color = "#c0392b"
 
         cell = QTableWidgetItem(text)
