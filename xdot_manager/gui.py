@@ -36,7 +36,7 @@ from .sensor import DotSensor, DotConnectError, DotError
 
 # ── Constantes visuelles ──────────────────────────────────────────────────────
 
-_COLS = ["#", "Adresse MAC", "Nom", "Adaptateur", "RSSI", "Batterie", "État"]
+_COLS = ["#", "Adresse MAC", "Nom", "Adaptateur", "RSSI", "Batterie", "État", "Santé"]
 
 _STATE_COLORS: dict[str, str] = {
     "Connecting":  "#8be9fd",   # bleu clair
@@ -279,6 +279,7 @@ class MainWindow(QMainWindow):
         t.setColumnWidth(0, 32)
         t.setColumnWidth(4, 80)
         t.setColumnWidth(5, 120)
+        t.setColumnWidth(7, 140)  # Santé
         return t
 
     # ── Boutons → coroutines ──────────────────────────────────────────────
@@ -574,6 +575,7 @@ class MainWindow(QMainWindow):
                 self._table.setItem(i, 4, _cell(f"{d.rssi} dBm", align=Qt.AlignmentFlag.AlignCenter))
                 self._table.setItem(i, 5, _cell("—", align=Qt.AlignmentFlag.AlignCenter))
                 self._table.setItem(i, 6, _state_cell("—"))
+                self._table.setItem(i, 7, self._health_score_cell(d.address))
             n = len(self._devices)
             adap_dist: dict[str, int] = {}
             for d in self._devices:
@@ -1272,14 +1274,17 @@ class MainWindow(QMainWindow):
     def _mark_health_drop(self, address: str) -> None:
         rec = self._touch_sensor_health(address)
         rec["drops"] += 1
+        self._update_health_cell(address)
 
     def _mark_health_reconnect(self, address: str) -> None:
         rec = self._touch_sensor_health(address)
         rec["reconnect_ok"] += 1
+        self._update_health_cell(address)
 
     def _mark_health_reconnect_fail(self, address: str) -> None:
         rec = self._touch_sensor_health(address)
         rec["reconnect_fail"] += 1
+        self._update_health_cell(address)
 
     def _health_suffix(self) -> str:
         if not self._sensor_health:
@@ -1300,6 +1305,50 @@ class MainWindow(QMainWindow):
         if drops > 0:
             return f"Santé: DÉGRADÉE ({drops} coupure(s))"
         return "Santé: OK"
+
+    def _health_score_cell(self, address: str) -> QTableWidgetItem:
+        """Retourne une cellule avec le score de stabilité (0-5 étoiles)."""
+        if address not in self._sensor_health:
+            # Aucun problème enregistré
+            cell = QTableWidgetItem("⭐⭐⭐⭐⭐ OK")
+            cell.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+            cell.setForeground(QColor("#27ae60"))  # vert
+            return cell
+        
+        h = self._sensor_health[address]
+        issues = h["drops"] + h["reconnect_fail"]
+        
+        if issues == 0:
+            text = "⭐⭐⭐⭐⭐ OK"
+            color = "#27ae60"  # vert
+        elif issues == 1:
+            text = "⭐⭐⭐⭐☆ Vigilance"
+            color = "#f39c12"  # orange
+        elif issues == 2:
+            text = "⭐⭐⭐☆☆ Instable"
+            color = "#e67e22"  # orange foncé
+        elif issues <= 4:
+            text = f"⭐⭐☆☆☆ Problème ({issues})"
+            color = "#e74c3c"  # rouge clair
+        else:
+            text = f"⭐☆☆☆☆ Critique ({issues})"
+            color = "#c0392b"  # rouge foncé
+        
+        cell = QTableWidgetItem(text)
+        cell.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+        cell.setForeground(QColor(color))
+        f = QFont()
+        f.setPointSize(9)
+        cell.setFont(f)
+        return cell
+
+    def _update_health_cell(self, address: str) -> None:
+        """Met à jour la cellule de santé pour un capteur donné."""
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 1)
+            if item and item.text() == address:
+                self._table.setItem(row, 7, self._health_score_cell(address))
+                break
 
     def _set_status(self, msg: str) -> None:
         n = len(self._sensors)
