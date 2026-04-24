@@ -14,12 +14,38 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
-from .sensor import DotSensor, DotState, DotError
+from .sensor import DotSensor, DotError, STATE_IDLE, STATE_RECORDING
 
 logger = logging.getLogger(__name__)
+
+# Sûreté : éviter les commandes concurrentes ou redondantes quand l'UI est très
+# sollicitée / quand beaucoup de capteurs sont connectés.
+_RECORDING_OP_LOCK = asyncio.Lock()
+_STAGGER_SEC = 0.05
+_GROUP_COOLDOWN_SEC = 0.15
+
+
+def _normalize_sensors(sensors: list[DotSensor]) -> tuple[list[DotSensor], list[str]]:
+    """Supprime les doublons par adresse et conserve l'ordre d'entrée."""
+    unique: list[DotSensor] = []
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for sensor in sensors:
+        addr = sensor.address.upper().strip()
+        if addr in seen:
+            duplicates.append(addr)
+            continue
+        seen.add(addr)
+        unique.append(sensor)
+    return unique, duplicates
+
+
+async def _read_state(sensor: DotSensor) -> int:
+    """Lit l'état réel du capteur avec un garde-fou de délai."""
+    return await asyncio.wait_for(sensor.cmd_get_state(), timeout=8.0)
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +92,30 @@ async def _record_one(
     Retourne (success, error_message).
     """
     try:
+        current_state = await _read_state(sensor)
+
         if action == "start":
+            if current_state == STATE_RECORDING:
+                timestamps.append(time.monotonic())
+                return True, ""
+            if current_state != STATE_IDLE:
+                return False, (
+                    f"état non autorisé avant démarrage : 0x{current_state:02x}"
+                )
             await sensor.cmd_start_recording()
+            confirmed_state = await _read_state(sensor)
+            if confirmed_state != STATE_RECORDING:
+                return False, (
+                    f"démarrage non confirmé (état={confirmed_state:#04x})"
+                )
         else:
+            if current_state == STATE_IDLE:
+                timestamps.append(time.monotonic())
+                return True, ""
+            if current_state != STATE_RECORDING:
+                return False, (
+                    f"état non autorisé avant arrêt : 0x{current_state:02x}"
+                )
             await sensor.cmd_stop_recording()
         timestamps.append(time.monotonic())
         return True, ""
@@ -93,51 +140,59 @@ async def start_all(sensors: list[DotSensor]) -> RecordingResult:
     Returns:
         RecordingResult avec jitter entre 1er et dernier ACK start.
     """
-    if not sensors:
-        return RecordingResult("start", True, {}, {})
+    async with _RECORDING_OP_LOCK:
+        if not sensors:
+            return RecordingResult("start", True, {}, {})
 
-    logger.info("START RECORDING sur %d capteur(s)...", len(sensors))
-    t0 = time.monotonic()
-    timestamps: list[float] = []
+        sensors, duplicates = _normalize_sensors(sensors)
 
-    # Group sensors by adapter to serialize operations per dongle
-    adapters: dict[str, list[DotSensor]] = {}
-    for s in sensors:
-        key = s.adapter.name if s.adapter else "local"
-        adapters.setdefault(key, []).append(s)
+        logger.info("START RECORDING sur %d capteur(s)...", len(sensors))
+        if duplicates:
+            logger.warning(
+                "Capteurs en doublon ignorés avant start: %s",
+                ", ".join(duplicates),
+            )
 
-    # Stagger between sensor commands to reduce RF collisions
-    STAGGER_SEC = 0.02  # 20 ms
+        t0 = time.monotonic()
+        timestamps: list[float] = []
 
-    outcomes: list[tuple[bool, str]] = []
-    # Process adapters sequentially (most conservative for reproducibility)
-    for adapter_name, group in adapters.items():
-        for s in group:
-            res = await _record_one(s, "start", timestamps)
-            outcomes.append(res)
-            await asyncio.sleep(STAGGER_SEC)
+        # Group sensors by adapter to serialize operations per dongle
+        adapters: dict[str, list[DotSensor]] = {}
+        for s in sensors:
+            key = s.adapter.name if s.adapter else "local"
+            adapters.setdefault(key, []).append(s)
 
-    per_sensor: dict[str, bool] = {}
-    errors: dict[str, str] = {}
-    for sensor, (ok, err) in zip(sensors, outcomes):
-        per_sensor[sensor.address] = ok
-        if not ok:
-            errors[sensor.address] = err
+        outcomes: list[tuple[bool, str]] = []
+        # Process adapters sequentially : priorité à la stabilité sur le débit.
+        for adapter_name, group in adapters.items():
+            logger.info("[%s] start group %d capteur(s)", adapter_name, len(group))
+            for s in group:
+                res = await _record_one(s, "start", timestamps)
+                outcomes.append(res)
+                await asyncio.sleep(_STAGGER_SEC)
+            await asyncio.sleep(_GROUP_COOLDOWN_SEC)
 
-    jitter_ms: Optional[float] = None
-    if len(timestamps) >= 2:
-        jitter_ms = (max(timestamps) - min(timestamps)) * 1000
+        per_sensor: dict[str, bool] = {}
+        errors: dict[str, str] = {}
+        for sensor, (ok, err) in zip(sensors, outcomes):
+            per_sensor[sensor.address] = ok
+            if not ok:
+                errors[sensor.address] = err
 
-    result = RecordingResult(
-        action="start",
-        success=all(per_sensor.values()),
-        per_sensor=per_sensor,
-        errors=errors,
-        jitter_ms=jitter_ms,
-        total_duration_ms=(time.monotonic() - t0) * 1000,
-    )
-    logger.info("%s", result)
-    return result
+        jitter_ms: Optional[float] = None
+        if len(timestamps) >= 2:
+            jitter_ms = (max(timestamps) - min(timestamps)) * 1000
+
+        result = RecordingResult(
+            action="start",
+            success=all(per_sensor.values()),
+            per_sensor=per_sensor,
+            errors=errors,
+            jitter_ms=jitter_ms,
+            total_duration_ms=(time.monotonic() - t0) * 1000,
+        )
+        logger.info("%s", result)
+        return result
 
 
 async def stop_all(sensors: list[DotSensor]) -> RecordingResult:
@@ -148,62 +203,78 @@ async def stop_all(sensors: list[DotSensor]) -> RecordingResult:
     sur beaucoup de capteurs simultanés), on vérifie l'état réel du capteur.
     Si le capteur est déjà en IDLE, on considère le stop comme réussi.
     """
-    if not sensors:
-        return RecordingResult("stop", True, {}, {})
+    async with _RECORDING_OP_LOCK:
+        if not sensors:
+            return RecordingResult("stop", True, {}, {})
 
-    logger.info("STOP RECORDING sur %d capteur(s)...", len(sensors))
-    t0 = time.monotonic()
-    timestamps: list[float] = []
+        sensors, duplicates = _normalize_sensors(sensors)
 
-    # Group sensors by adapter to serialize operations per dongle
-    adapters: dict[str, list[DotSensor]] = {}
-    for s in sensors:
-        key = s.adapter.name if s.adapter else "local"
-        adapters.setdefault(key, []).append(s)
+        logger.info("STOP RECORDING sur %d capteur(s)...", len(sensors))
+        if duplicates:
+            logger.warning(
+                "Capteurs en doublon ignorés avant stop: %s",
+                ", ".join(duplicates),
+            )
 
-    STAGGER_SEC = 0.02  # 20 ms
+        t0 = time.monotonic()
+        timestamps: list[float] = []
 
-    outcomes: list[tuple[bool, str]] = []
-    for adapter_name, group in adapters.items():
-        for s in group:
-            res = await _record_one(s, "stop", timestamps)
-            outcomes.append(res)
-            await asyncio.sleep(STAGGER_SEC)
+        # Group sensors by adapter to serialize operations per dongle
+        adapters: dict[str, list[DotSensor]] = {}
+        for s in sensors:
+            key = s.adapter.name if s.adapter else "local"
+            adapters.setdefault(key, []).append(s)
 
-    per_sensor: dict[str, bool] = {}
-    errors: dict[str, str] = {}
-    retry_sensors: list[DotSensor] = []
+        outcomes: list[tuple[bool, str]] = []
+        for adapter_name, group in adapters.items():
+            logger.info("[%s] stop group %d capteur(s)", adapter_name, len(group))
+            for s in group:
+                res = await _record_one(s, "stop", timestamps)
+                outcomes.append(res)
+                await asyncio.sleep(_STAGGER_SEC)
+            await asyncio.sleep(_GROUP_COOLDOWN_SEC)
 
-    for sensor, (ok, err) in zip(sensors, outcomes):
-        per_sensor[sensor.address] = ok
-        if not ok:
-            errors[sensor.address] = err
-            retry_sensors.append(sensor)
+        per_sensor: dict[str, bool] = {}
+        errors: dict[str, str] = {}
+        retry_sensors: list[DotSensor] = []
 
-    # Passe de récupération : cmd_stop_recording poll maintenant l'état en
-    # interne. Si elle a levé une exception, le capteur n'était pas en IDLE
-    # après 12s. On tente un dernier stop individuel après une pause.
-    if retry_sensors:
-        await asyncio.sleep(2.0)
-        for sensor in retry_sensors:
-            try:
-                await sensor.cmd_stop_recording()
-                per_sensor[sensor.address] = True
-                errors.pop(sensor.address, None)
-                timestamps.append(time.monotonic())
-                logger.info("[%s] Retry stop OK", sensor.name)
-            except Exception as exc2:
-                logger.error("[%s] Retry stop échoué : %s", sensor.name, exc2)
+        for sensor, (ok, err) in zip(sensors, outcomes):
+            per_sensor[sensor.address] = ok
+            if not ok:
+                errors[sensor.address] = err
+                retry_sensors.append(sensor)
 
-    result = RecordingResult(
-        action="stop",
-        success=all(per_sensor.values()),
-        per_sensor=per_sensor,
-        errors=errors,
-        total_duration_ms=(time.monotonic() - t0) * 1000,
-    )
-    logger.info("%s", result)
-    return result
+        # Passe de récupération : si l'ACK n'est pas fiable, on revalide l'état
+        # réel. En production, on ne considère pas un doute comme un succès.
+        if retry_sensors:
+            await asyncio.sleep(2.0)
+            for sensor in retry_sensors:
+                try:
+                    state = await _read_state(sensor)
+                    if state == STATE_IDLE:
+                        per_sensor[sensor.address] = True
+                        errors.pop(sensor.address, None)
+                        timestamps.append(time.monotonic())
+                        logger.info("[%s] Retry stop validé par état IDLE", sensor.name)
+                        continue
+
+                    await sensor.cmd_stop_recording()
+                    per_sensor[sensor.address] = True
+                    errors.pop(sensor.address, None)
+                    timestamps.append(time.monotonic())
+                    logger.info("[%s] Retry stop OK", sensor.name)
+                except Exception as exc2:
+                    logger.error("[%s] Retry stop échoué : %s", sensor.name, exc2)
+
+        result = RecordingResult(
+            action="stop",
+            success=all(per_sensor.values()),
+            per_sensor=per_sensor,
+            errors=errors,
+            total_duration_ms=(time.monotonic() - t0) * 1000,
+        )
+        logger.info("%s", result)
+        return result
 
 
 async def wait_duration(seconds: float, label: str = "Enregistrement") -> None:

@@ -19,6 +19,10 @@ Interface graphique PyQt6 permettant de connecter, synchroniser, enregistrer et 
 - **Effacement flash** avec confirmation
 - **Reconnexion robuste** avec retries, purge automatique des capteurs déconnectés
 
+> **Sûreté opérationnelle** : pour préserver la stabilité, il est préférable de
+répartir la charge sur plusieurs dongles et d'éviter de pousser chaque adaptateu
+r au maximum théorique.
+
 ---
 
 ## Prérequis
@@ -201,6 +205,15 @@ Le `timestamp` est en **microsecondes** (entier 64 bits, base interne DOT).
 
 ## Dépannage
 
+### Recommandations de sûreté BLE
+
+- Éviter de saturer un seul dongle avec trop de capteurs.
+- Garder une marge de capacité par adaptateur pour le scan, la synchronisation
+    et les écritures flash.
+- Préférer 2 à 3 dongles bien répartis plutôt qu'une configuration limite.
+- En cas de déconnexions répétées, réduire temporairement le nombre de capteurs
+    par adaptateur.
+
 ### Capteur non détecté au scan
 
 ```bash
@@ -244,6 +257,9 @@ Le scanner détecte automatiquement tous les adaptateurs `hciX` disponibles. Pou
 MAX_PER_ADAPTER = 6  # pour 3 dongles × 6 = 18 capteurs
 ```
 
+En pratique, une valeur plus basse peut être préférable si le service Bluetooth
+est déjà très sollicité.
+
 ---
 
 ## Dépendances matérielles testées
@@ -252,7 +268,10 @@ MAX_PER_ADAPTER = 6  # pour 3 dongles × 6 = 18 capteurs
 |---|---|
 | 16 capteurs, 2 dongles hci0+hci1 | ✅ Stable |
 | 18 capteurs, 3 dongles hci0+hci1+hci2 | ✅ Stable |
-| 18 capteurs, 1 seul dongle | ❌ Trop de congestion BLE |
+| 18 capteurs, 1 seul dongle | ⚠️ Fortement déconseillé |
+
+Pour une utilisation longue durée, privilégier la configuration la moins chargée
+possible par adaptateur.
 
 ---
 
