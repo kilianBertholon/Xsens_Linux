@@ -36,7 +36,7 @@ from .sensor import DotSensor, DotConnectError, DotError
 
 # ── Constantes visuelles ──────────────────────────────────────────────────────
 
-_COLS = ["#", "Adresse MAC", "Nom", "Adaptateur", "RSSI", "Batterie", "État", "Santé"]
+_COLS = ["#", "Adresse MAC", "Nom", "Adaptateur", "RSSI", "État", "Santé"]
 
 _STATE_COLORS: dict[str, str] = {
     "Connecting":  "#8be9fd",   # bleu clair
@@ -280,9 +280,8 @@ class MainWindow(QMainWindow):
         vheader.setVisible(False)
         t.setColumnWidth(0, 32)
         t.setColumnWidth(4, 80)
-        t.setColumnWidth(5, 120)
-        t.setColumnWidth(7, 140)  # Santé
-        t.setColumnHidden(5, True)
+        t.setColumnWidth(5, 120)  # État
+        t.setColumnWidth(6, 140)  # Santé
         return t
 
     # ── Boutons → coroutines ──────────────────────────────────────────────
@@ -581,9 +580,8 @@ class MainWindow(QMainWindow):
                 self._table.setItem(i, 2, _cell(d.name or ""))
                 self._table.setItem(i, 3, _cell(d.adapter.bleak_id))
                 self._table.setItem(i, 4, _cell(f"{d.rssi} dBm", align=Qt.AlignmentFlag.AlignCenter))
-                self._table.setItem(i, 5, _cell("—", align=Qt.AlignmentFlag.AlignCenter))
-                self._table.setItem(i, 6, _state_cell("—"))
-                self._table.setItem(i, 7, self._health_score_cell(d.address))
+                self._table.setItem(i, 5, _state_cell("—"))
+                self._table.setItem(i, 6, self._health_score_cell(d.address))
             n = len(self._devices)
             adap_dist: dict[str, int] = {}
             for d in self._devices:
@@ -1228,8 +1226,8 @@ class MainWindow(QMainWindow):
         for row in range(self._table.rowCount()):
             item = self._table.item(row, 1)
             if item and item.text().upper() == key:
-                self._table.setItem(row, 6, _state_cell(state))
-                self._table.setItem(row, 7, self._health_score_cell(key))
+                self._table.setItem(row, 5, _state_cell(state))
+                self._table.setItem(row, 6, self._health_score_cell(key))
                 break
 
     def _log(self, msg: str) -> None:
@@ -1291,7 +1289,7 @@ class MainWindow(QMainWindow):
         for row in range(self._table.rowCount()):
             mac_item = self._table.item(row, 1)
             if mac_item and mac_item.text().upper() == key:
-                state_item = self._table.item(row, 6)
+                state_item = self._table.item(row, 5)
                 if state_item:
                     state = state_item.text()
                 break
@@ -1361,7 +1359,7 @@ class MainWindow(QMainWindow):
         for row in range(self._table.rowCount()):
             item = self._table.item(row, 1)
             if item and item.text().upper() == key:
-                self._table.setItem(row, 7, self._health_score_cell(key))
+                self._table.setItem(row, 6, self._health_score_cell(key))
                 break
 
     def _set_status(self, msg: str) -> None:

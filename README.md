@@ -216,7 +216,7 @@ Le `timestamp` est en **microsecondes** (entier 64 bits, base interne DOT).
 
 ### Optimisation charge BLE (GUI)
 
-- La colonne **Batterie** est masquée dans l'interface principale.
+- La colonne **Batterie** est retirée de l'interface principale.
 - Le polling périodique du niveau batterie est désactivé pour réduire la charge
     GATT et privilégier la stabilité des opérations critiques (sync / start / stop / export).
 
