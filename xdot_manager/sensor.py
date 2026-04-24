@@ -467,7 +467,15 @@ class DotSensor:
         """
         logger.info("[%s] START RECORDING (duration=%ss)", self.name,
                     "illimitée" if recording_time == 0xFFFF else recording_time)
-        await self.send_and_ack(start_recording(recording_time=recording_time))
+        # Le registre ACK BlueZ peut être périmé juste après une sync ou une
+        # lecture d'état. On attend un court instant et on augmente les essais
+        # pour favoriser la stabilité plutôt que la latence.
+        await self.send_and_ack(
+            start_recording(recording_time=recording_time),
+            retries=12,
+            retry_delay=0.10,
+            pre_delay=0.15,
+        )
         self.state = DotState.RECORDING
 
     async def cmd_stop_recording(self) -> None:

@@ -48,6 +48,14 @@ async def _read_state(sensor: DotSensor) -> int:
     return await asyncio.wait_for(sensor.cmd_get_state(), timeout=8.0)
 
 
+async def _read_state_or_none(sensor: DotSensor) -> Optional[int]:
+    """Lit l'état réel du capteur sans propager les timeouts/transitoires."""
+    try:
+        return await _read_state(sensor)
+    except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError, DotError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Résultat
 # ---------------------------------------------------------------------------
@@ -92,7 +100,9 @@ async def _record_one(
     Retourne (success, error_message).
     """
     try:
-        current_state = await _read_state(sensor)
+        current_state = await _read_state_or_none(sensor)
+        if current_state is None:
+            return False, "état capteur indisponible avant commande"
 
         if action == "start":
             if current_state == STATE_RECORDING:
@@ -102,12 +112,33 @@ async def _record_one(
                 return False, (
                     f"état non autorisé avant démarrage : 0x{current_state:02x}"
                 )
-            await sensor.cmd_start_recording()
-            confirmed_state = await _read_state(sensor)
-            if confirmed_state != STATE_RECORDING:
-                return False, (
-                    f"démarrage non confirmé (état={confirmed_state:#04x})"
+            try:
+                await sensor.cmd_start_recording()
+            except DotError as exc:
+                # Si l'ACK est périmé mais que l'état réel a basculé en
+                # enregistrement, on préfère considérer l'opération comme réussie.
+                await asyncio.sleep(0.25)
+                confirmed_state = await _read_state_or_none(sensor)
+                if confirmed_state == STATE_RECORDING:
+                    timestamps.append(time.monotonic())
+                    logger.warning(
+                        "[%s] start_recording: ACK périmé accepté car l'état réel est RECORDING.",
+                        sensor.name,
+                    )
+                    return True, ""
+                raise exc
+
+            await asyncio.sleep(0.15)
+            confirmed_state = await _read_state_or_none(sensor)
+            if confirmed_state is None:
+                timestamps.append(time.monotonic())
+                logger.warning(
+                    "[%s] start_recording: confirmation d'état indisponible, commande acceptée.",
+                    sensor.name,
                 )
+                return True, ""
+            if confirmed_state != STATE_RECORDING:
+                return False, f"démarrage non confirmé (état={confirmed_state:#04x})"
         else:
             if current_state == STATE_IDLE:
                 timestamps.append(time.monotonic())
@@ -116,7 +147,19 @@ async def _record_one(
                 return False, (
                     f"état non autorisé avant arrêt : 0x{current_state:02x}"
                 )
-            await sensor.cmd_stop_recording()
+            try:
+                await sensor.cmd_stop_recording()
+            except DotError:
+                await asyncio.sleep(0.35)
+                confirmed_state = await _read_state_or_none(sensor)
+                if confirmed_state == STATE_IDLE:
+                    timestamps.append(time.monotonic())
+                    logger.warning(
+                        "[%s] stop_recording: ACK périmé accepté car l'état réel est IDLE.",
+                        sensor.name,
+                    )
+                    return True, ""
+                raise
         timestamps.append(time.monotonic())
         return True, ""
     except DotError as exc:
