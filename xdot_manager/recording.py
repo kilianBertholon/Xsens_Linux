@@ -93,6 +93,7 @@ async def _record_one(
     sensor: DotSensor,
     action: str,          # "start" ou "stop"
     timestamps: list[float],
+    stale_ack_accepted: Optional[dict[str, int]] = None,
 ) -> tuple[bool, str]:
     """
     Exécute start_recording ou stop_recording sur un capteur.
@@ -121,10 +122,8 @@ async def _record_one(
                 confirmed_state = await _read_state_or_none(sensor)
                 if confirmed_state == STATE_RECORDING:
                     timestamps.append(time.monotonic())
-                    logger.warning(
-                        "[%s] start_recording: ACK périmé accepté car l'état réel est RECORDING.",
-                        sensor.name,
-                    )
+                    if stale_ack_accepted is not None:
+                        stale_ack_accepted[sensor.address] = stale_ack_accepted.get(sensor.address, 0) + 1
                     return True, ""
                 raise exc
 
@@ -154,10 +153,8 @@ async def _record_one(
                 confirmed_state = await _read_state_or_none(sensor)
                 if confirmed_state == STATE_IDLE:
                     timestamps.append(time.monotonic())
-                    logger.warning(
-                        "[%s] stop_recording: ACK périmé accepté car l'état réel est IDLE.",
-                        sensor.name,
-                    )
+                    if stale_ack_accepted is not None:
+                        stale_ack_accepted[sensor.address] = stale_ack_accepted.get(sensor.address, 0) + 1
                     return True, ""
                 raise
         timestamps.append(time.monotonic())
@@ -198,6 +195,7 @@ async def start_all(sensors: list[DotSensor]) -> RecordingResult:
 
         t0 = time.monotonic()
         timestamps: list[float] = []
+        stale_ack_accepted: dict[str, int] = {}
 
         # Group sensors by adapter to serialize operations per dongle
         adapters: dict[str, list[DotSensor]] = {}
@@ -210,10 +208,21 @@ async def start_all(sensors: list[DotSensor]) -> RecordingResult:
         for adapter_name, group in adapters.items():
             logger.info("[%s] start group %d capteur(s)", adapter_name, len(group))
             for s in group:
-                res = await _record_one(s, "start", timestamps)
+                res = await _record_one(s, "start", timestamps, stale_ack_accepted)
                 outcomes.append(res)
                 await asyncio.sleep(_STAGGER_SEC)
             await asyncio.sleep(_GROUP_COOLDOWN_SEC)
+
+        if stale_ack_accepted:
+            total = sum(stale_ack_accepted.values())
+            details = ", ".join(
+                f"{addr}×{count}" for addr, count in sorted(stale_ack_accepted.items())
+            )
+            logger.warning(
+                "start_recording: %d ACK périmé(s) accepté(s) via état réel RECORDING [%s]",
+                total,
+                details,
+            )
 
         per_sensor: dict[str, bool] = {}
         errors: dict[str, str] = {}
@@ -261,6 +270,7 @@ async def stop_all(sensors: list[DotSensor]) -> RecordingResult:
 
         t0 = time.monotonic()
         timestamps: list[float] = []
+        stale_ack_accepted: dict[str, int] = {}
 
         # Group sensors by adapter to serialize operations per dongle
         adapters: dict[str, list[DotSensor]] = {}
@@ -272,10 +282,21 @@ async def stop_all(sensors: list[DotSensor]) -> RecordingResult:
         for adapter_name, group in adapters.items():
             logger.info("[%s] stop group %d capteur(s)", adapter_name, len(group))
             for s in group:
-                res = await _record_one(s, "stop", timestamps)
+                res = await _record_one(s, "stop", timestamps, stale_ack_accepted)
                 outcomes.append(res)
                 await asyncio.sleep(_STAGGER_SEC)
             await asyncio.sleep(_GROUP_COOLDOWN_SEC)
+
+        if stale_ack_accepted:
+            total = sum(stale_ack_accepted.values())
+            details = ", ".join(
+                f"{addr}×{count}" for addr, count in sorted(stale_ack_accepted.items())
+            )
+            logger.warning(
+                "stop_recording: %d ACK périmé(s) accepté(s) via état réel IDLE [%s]",
+                total,
+                details,
+            )
 
         per_sensor: dict[str, bool] = {}
         errors: dict[str, str] = {}
