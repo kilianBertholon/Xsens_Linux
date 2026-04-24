@@ -124,6 +124,19 @@ class DotSensor:
         # Callback optionnel appelé pour chaque notification brute
         self._notify_callback: Optional[Callable[[bytes], None]] = None
 
+        self.battery_level: Optional[int] = None
+        self.on_disconnected: Optional[Callable[["DotSensor"], None]] = None
+
+    def _bleak_disconnected_cb(self, client: BleakClient) -> None:
+        """Callback interne de Bleak en cas de déconnexion."""
+        if self.state != DotState.DISCONNECTED:
+            logger.warning("[%s] Connexion BLE perdue.", self.name)
+            self.state = DotState.ERROR
+            if self.on_disconnected:
+                # Appeler en asynchrone / sans bloquer la boucle
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(self.on_disconnected, self)
+
     # ------------------------------------------------------------------
     # Context manager
     # ------------------------------------------------------------------
@@ -163,6 +176,8 @@ class DotSensor:
                 kwargs = {"timeout": CONNECT_TIMEOUT}
                 if adapter_id:
                     kwargs["adapter"] = adapter_id
+                
+                kwargs["disconnected_callback"] = self._bleak_disconnected_cb
 
                 client = BleakClient(self.address, **kwargs)
                 async with sem:
@@ -199,18 +214,23 @@ class DotSensor:
 
     async def disconnect(self) -> None:
         """Déconnecte proprement le capteur."""
+        self.state = DotState.DISCONNECTED
         if self._client and self._client.is_connected:
             try:
                 await self._client.disconnect()
             except Exception as exc:
                 logger.debug("[%s] Erreur déconnexion : %s", self.name, exc)
         self._client = None
-        self.state = DotState.DISCONNECTED
         logger.info("[%s] Déconnecté.", self.name)
 
     @property
     def is_connected(self) -> bool:
         return self._client is not None and self._client.is_connected
+
+    @property
+    def is_active(self) -> bool:
+        """Indique si le capteur est en cours d'utilisation ou en tentative de connexion."""
+        return self.state in (DotState.CONNECTING, DotState.CONNECTED, DotState.SYNCING, DotState.RECORDING, DotState.EXPORTING)
 
     # ------------------------------------------------------------------
     # Primitives GATT bas niveau
@@ -570,6 +590,21 @@ class DotSensor:
             f"[{self.name}] Effacement flash non terminé après {timeout:.0f}s "
             f"(dernier état : {STATE_NAMES.get(state, f'0x{state:02x}')})"
         )
+
+    async def cmd_get_battery(self) -> Optional[int]:
+        """Lit le niveau de batterie (0-100)."""
+        client = self._require_connected()
+        try:
+            raw = await asyncio.wait_for(
+                client.read_gatt_char("00002a19-0000-1000-8000-00805f9b34fb"),
+                timeout=GATT_TIMEOUT,
+            )
+            val = int.from_bytes(raw, byteorder='little')
+            self.battery_level = val
+            return val
+        except Exception as exc:
+            logger.debug("[%s] Impossible de lire la batterie : %s", self.name, exc)
+            return None
 
     # ------------------------------------------------------------------
     # Représentation

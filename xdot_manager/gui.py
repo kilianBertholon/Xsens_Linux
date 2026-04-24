@@ -36,7 +36,7 @@ from .sensor import DotSensor, DotConnectError, DotError
 
 # ── Constantes visuelles ──────────────────────────────────────────────────────
 
-_COLS = ["#", "Adresse MAC", "Nom", "Adaptateur", "RSSI", "État"]
+_COLS = ["#", "Adresse MAC", "Nom", "Adaptateur", "RSSI", "Batterie", "État"]
 
 _STATE_COLORS: dict[str, str] = {
     "Connecting":  "#8be9fd",   # bleu clair
@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
         self._devices: list = []          # résultats du scan
         self._sensors: list[DotSensor] = []
         self._recording = False
+        self._is_busy = False
         self._recording_start: Optional[datetime] = None
         self._output_dir = Path("./xdot_export")
 
@@ -139,6 +140,10 @@ class MainWindow(QMainWindow):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick_timer)
+
+        self._battery_timer = QTimer(self)
+        self._battery_timer.timeout.connect(self._poll_battery)
+        self._battery_timer.start(10000)  # Toutes les 10 secondes
 
         self._build_ui()
         self._refresh_adapter_indicator()
@@ -228,13 +233,14 @@ class MainWindow(QMainWindow):
         self._btn_sync    = _btn("⟳ Synchroniser",   self._on_sync, "#7c3aed")
         self._btn_rec     = _btn("⏺ Enregistrer",    self._on_start_rec, "#c0392b")
         self._btn_stop    = _btn("⏹ Arrêter",        self._on_stop_rec, "#7f8c8d")
+        self._btn_disconnect = _btn("🔌 Déconnecter sélection", self._on_disconnect_selected, "#475569")
         self._btn_tests   = _btn("🧪 Tests",         self._on_tests, "#6d28d9")
         self._btn_flash   = _btn("💽 Flash info",     self._on_flash_info, "#2e4057")
         self._btn_export  = _btn("💾 Exporter",       self._on_export, "#1565c0")
         self._btn_erase   = _btn("🗑 Effacer flash",  self._on_erase, "#b45309")
 
         for b in [self._btn_scan, self._btn_connect, self._btn_sync,
-              self._btn_rec, self._btn_stop, self._btn_tests,
+              self._btn_rec, self._btn_stop, self._btn_disconnect, self._btn_tests,
                   self._btn_flash, self._btn_export, self._btn_erase,
               ]:
             layout.addWidget(b)
@@ -274,6 +280,7 @@ class MainWindow(QMainWindow):
     def _on_sync(self)        : asyncio.ensure_future(self._sync())
     def _on_start_rec(self)   : asyncio.ensure_future(self._start_recording())
     def _on_stop_rec(self)    : asyncio.ensure_future(self._stop_recording())
+    def _on_disconnect_selected(self): asyncio.ensure_future(self._disconnect_selected())
     def _on_flash_info(self)  : asyncio.ensure_future(self._flash_info())
     def _on_tests(self)       : asyncio.ensure_future(self._open_tests_hub())
     def _on_export(self)      : asyncio.ensure_future(self._export_with_dialog())
@@ -450,7 +457,8 @@ class MainWindow(QMainWindow):
                 self._table.setItem(i, 2, _cell(d.name or ""))
                 self._table.setItem(i, 3, _cell(d.adapter.bleak_id))
                 self._table.setItem(i, 4, _cell(f"{d.rssi} dBm", align=Qt.AlignmentFlag.AlignCenter))
-                self._table.setItem(i, 5, _state_cell("—"))
+                self._table.setItem(i, 5, _cell("—", align=Qt.AlignmentFlag.AlignCenter))
+                self._table.setItem(i, 6, _state_cell("—"))
             n = len(self._devices)
             adap_dist: dict[str, int] = {}
             for d in self._devices:
@@ -467,6 +475,30 @@ class MainWindow(QMainWindow):
             self._refresh_adapter_indicator()
             self._set_busy(False)
             self._refresh_buttons()
+
+    def _on_sensor_disconnected(self, sensor: DotSensor) -> None:
+        """Déclenché par callback en asynchrone lors d'une chute inattendue."""
+        if sensor not in self._sensors or self._recording:
+            return  # Déconnecté volontairement ou en cours de record (géré ailleurs)
+        
+        self._set_row_state(sensor.address, "Connecting")
+        self._log(f"<span style='color:#f1c40f'>⚠ <b>{sensor.address}</b> connexion perdue, tentative automatique...</span>")
+        
+        async def _reconnect():
+            try:
+                await asyncio.sleep(2.0) # Petit délai de stabilisation
+                await sensor.connect()
+                self._set_row_state(sensor.address, "Idle")
+                self._log(f"<span style='color:#a6e3a1'>✔ <b>{sensor.address}</b> reconnecté automatiquement.</span>")
+                self._refresh_adapter_indicator()
+                self._refresh_buttons()
+            except Exception as exc:
+                self._set_row_state(sensor.address, "ERREUR")
+                self._log(f"<span style='color:#f38ba8'>✖ Échec reconnexion de {sensor.address} : {exc}</span>")
+                # On purge la connexion
+                self._purge_disconnected()
+        
+        asyncio.create_task(_reconnect())
 
     async def _connect(self) -> None:
         if not self._devices:
@@ -487,6 +519,7 @@ class MainWindow(QMainWindow):
 
         async def _c(d):
             s = DotSensor(d.address, adapter=d.adapter, name=d.address[-5:])
+            s.on_disconnected = self._on_sensor_disconnected  # Auto-reconnect hook
             try:
                 await s.connect()
                 try:
@@ -525,8 +558,13 @@ class MainWindow(QMainWindow):
         if not self._sensors:
             self._log("[AVERTISSEMENT] Aucun capteur connecté après purge.")
             return
+        
         preflight = await self._run_preflight()
         self._log_preflight_result(preflight)
+        if not preflight.ok:
+            self._log("<span style='color:#f38ba8'>[ERREUR] Échec du contrôle avant-vol (Preflight). Veuillez déconnecter le capteur en erreur ou attendre sa reconnexion automatique.</span>")
+            return
+            
         await self._ensure_output_rate(120)
         n = len(self._sensors)
         self._sync_total = n
@@ -596,6 +634,13 @@ class MainWindow(QMainWindow):
         if not self._sensors:
             self._log("[AVERTISSEMENT] Aucun capteur connecté après purge.")
             return
+
+        preflight = await self._run_preflight()
+        if not preflight.ok:
+            self._log_preflight_result(preflight)
+            self._log("<span style='color:#f38ba8'>[ERREUR] Impossible de lancer l'enregistrement. Veuillez déconnecter le capteur en erreur ou attendre sa reconnexion automatique.</span>")
+            return
+
         await self._ensure_output_rate(120)
         self._log("Démarrage de l'enregistrement...")
         self._set_busy(True)
@@ -645,6 +690,59 @@ class MainWindow(QMainWindow):
         finally:
             # Purger les capteurs qui se sont déconnectés pendant l'enregistrement
             self._purge_disconnected()
+            self._set_busy(False)
+            self._refresh_buttons()
+
+    def _selected_addresses(self) -> list[str]:
+        """Retourne les adresses MAC des lignes actuellement sélectionnées."""
+        selection_model = self._table.selectionModel()
+        if selection_model is None:
+            return []
+        rows = sorted({idx.row() for idx in selection_model.selectedRows()})
+        addrs: list[str] = []
+        for row in rows:
+            item = self._table.item(row, 1)
+            if item and item.text().strip():
+                addrs.append(item.text().strip().upper())
+        return addrs
+
+    async def _disconnect_selected(self) -> None:
+        """Déconnecte les capteurs sélectionnés dans le tableau."""
+        if self._recording:
+            self._log("[AVERTISSEMENT] Impossible de déconnecter pendant l'enregistrement.")
+            return
+
+        selected = self._selected_addresses()
+        if not selected:
+            self._log("[AVERTISSEMENT] Sélectionner au moins un capteur dans le tableau.")
+            return
+
+        sensor_map = {s.address.upper(): s for s in self._sensors}
+        targets = [sensor_map[a] for a in selected if a in sensor_map]
+        if not targets:
+            self._log("[INFO] Aucun capteur sélectionné n'est actuellement connecté.")
+            return
+
+        self._log(f"Déconnexion ciblée de {len(targets)} capteur(s)...")
+        self._set_busy(True)
+        try:
+            results = await asyncio.gather(*[s.disconnect() for s in targets], return_exceptions=True)
+            disconnected = 0
+            for s, res in zip(targets, results):
+                if isinstance(res, Exception):
+                    self._set_row_state(s.address, "ERREUR")
+                    self._log(f"  <span style='color:#f38ba8'>{s.address} : {res}</span>")
+                else:
+                    disconnected += 1
+                    self._set_row_state(s.address, "—")
+
+            # Retirer de la liste active les capteurs effectivement déconnectés
+            self._sensors = [s for s in self._sensors if s.is_active]
+
+            self._log(f"<span style='color:#a6e3a1'>Déconnectés : {disconnected}/{len(targets)}</span>")
+            self._set_status(f"{len(self._sensors)} connecté(s)")
+        finally:
+            self._refresh_adapter_indicator()
             self._set_busy(False)
             self._refresh_buttons()
 
@@ -968,11 +1066,34 @@ class MainWindow(QMainWindow):
             m, s = divmod(r, 60)
             self._lbl_timer.setText(f"⏺ {h:02d}:{m:02d}:{s:02d}")
 
+    def _poll_battery(self) -> None:
+        """Poll le niveau de batterie en arrière-plan."""
+        if self._is_busy or self._recording:
+            return
+        
+        async def _fetch():
+            to_poll = [s for s in self._sensors if s.is_connected]
+            for s in to_poll:
+                if self._is_busy or self._recording or not s.is_connected:
+                    break
+                b = await s.cmd_get_battery()
+                if b is not None:
+                    self._set_row_battery(s.address, b)
+        
+        asyncio.create_task(_fetch())
+
     def _set_row_state(self, address: str, state: str) -> None:
         for row in range(self._table.rowCount()):
             item = self._table.item(row, 1)
             if item and item.text() == address:
-                self._table.setItem(row, 5, _state_cell(state))
+                self._table.setItem(row, 6, _state_cell(state))
+                break
+
+    def _set_row_battery(self, address: str, level: int) -> None:
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 1)
+            if item and item.text() == address:
+                self._table.setItem(row, 5, _cell(f"{level}%", align=Qt.AlignmentFlag.AlignCenter))
                 break
 
     def _log(self, msg: str) -> None:
@@ -989,19 +1110,20 @@ class MainWindow(QMainWindow):
         """Désactive les boutons pendant une opération.
         Le bouton Arrêter reste actif si l'enregistrement est en cours.
         """
+        self._is_busy = busy
         for b in [self._btn_scan, self._btn_connect, self._btn_sync,
-                                    self._btn_rec, self._btn_tests, self._btn_flash,
+                                    self._btn_rec, self._btn_disconnect, self._btn_tests, self._btn_flash,
                                     self._btn_export, self._btn_erase, self._btn_refresh_adapters]:
             b.setEnabled(not busy)
         # btn_stop : actif si enregistrement en cours, même pendant busy
         self._btn_stop.setEnabled(self._recording)
 
     def _purge_disconnected(self) -> int:
-        """Retire de self._sensors les capteurs dont la connexion BLE est tombée.
+        """Retire de self._sensors les capteurs dont la connexion BLE est tombée définitivement.
         Retourne le nombre de capteurs retirés.
         Un seul log est émis pour tous les capteurs retirés.
         """
-        lost = [s for s in self._sensors if not s.is_connected]
+        lost = [s for s in self._sensors if not s.is_active]
         if lost:
             addrs = ", ".join(s.address for s in lost)
             self._log(
@@ -1010,7 +1132,7 @@ class MainWindow(QMainWindow):
             )
             for s in lost:
                 self._set_row_state(s.address, "ERREUR")
-            self._sensors = [s for s in self._sensors if s.is_connected]
+            self._sensors = [s for s in self._sensors if s.is_active]
             self._refresh_adapter_indicator()
             self._refresh_buttons()
         return len(lost)
@@ -1024,6 +1146,7 @@ class MainWindow(QMainWindow):
         self._btn_sync.setEnabled(connected and not self._recording)
         self._btn_rec.setEnabled(connected and not self._recording)
         self._btn_stop.setEnabled(connected and self._recording)
+        self._btn_disconnect.setEnabled(connected and not self._recording)
         self._btn_tests.setEnabled(not self._recording)
         self._btn_flash.setEnabled(connected and not self._recording)
         self._btn_export.setEnabled(connected and not self._recording)
