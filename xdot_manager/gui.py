@@ -127,6 +127,10 @@ class MainWindow(QMainWindow):
         self._recording_start: Optional[datetime] = None
         self._output_dir = Path("./xdot_export")
 
+        # Santé opérationnelle (déconnexions/reconnexions)
+        self._sensor_health: dict[str, dict[str, int]] = {}
+        self._last_degraded_excluded: set[str] = set()
+
         # Résultats du dernier export (pour analyse jitter)
         self._last_export_results: list = []
         self._last_export_dir: Optional[Path] = None
@@ -519,6 +523,7 @@ class MainWindow(QMainWindow):
         rssi_by_addr = {d.address.upper(): d.rssi for d in self._devices}
         selected: list[DotSensor] = []
         skipped: list[str] = []
+        degraded_details: list[str] = []
 
         for adapter_name, group in sorted(by_adapter.items()):
             ordered = sorted(
@@ -530,18 +535,19 @@ class MainWindow(QMainWindow):
             drop = ordered[_SAFE_SENSORS_PER_ADAPTER:]
             selected.extend(keep)
             skipped.extend([sensor.address for sensor in drop])
-
             if drop:
-                self._log(
-                    f"<span style='color:#f1c40f'>[MODE DÉGRADÉ] {adapter_name}: "
-                    f"{len(keep)}/{len(group)} capteur(s) retenu(s) (RSSI prioritaire).</span>"
-                )
+                degraded_details.append(f"{adapter_name}:{len(keep)}/{len(group)}")
 
-        if skipped:
-            self._log(
-                f"<span style='color:#f1c40f'>[MODE DÉGRADÉ] Capteurs temporairement exclus des opérations: "
-                f"{', '.join(skipped)}</span>"
-            )
+        skipped_set = set(skipped)
+        if skipped_set != self._last_degraded_excluded:
+            if skipped:
+                self._log(
+                    f"<span style='color:#f1c40f'>[MODE DÉGRADÉ] "
+                    f"Activation ({', '.join(degraded_details)}) — exclus: {', '.join(skipped)}</span>"
+                )
+            elif self._last_degraded_excluded:
+                self._log("<span style='color:#a6e3a1'>[MODE DÉGRADÉ] Désactivé — capacité nominale restaurée.</span>")
+            self._last_degraded_excluded = skipped_set
 
         return selected
 
@@ -585,10 +591,11 @@ class MainWindow(QMainWindow):
         """Déclenché par callback en asynchrone lors d'une chute inattendue."""
         if sensor not in self._sensors or self._recording:
             return  # Déconnecté volontairement ou en cours de record (géré ailleurs)
-        
+
+        self._mark_health_drop(sensor.address)
         self._set_row_state(sensor.address, "Connecting")
         self._log(f"<span style='color:#f1c40f'>⚠ <b>{sensor.address}</b> connexion perdue, tentative automatique...</span>")
-        
+
         async def _reconnect():
             try:
                 await asyncio.sleep(2.0) # Petit délai de stabilisation
@@ -607,10 +614,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+                self._mark_health_reconnect(sensor.address)
                 self._log(f"<span style='color:#a6e3a1'>✔ <b>{sensor.address}</b> reconnecté automatiquement.</span>")
                 self._refresh_adapter_indicator()
                 self._refresh_buttons()
             except Exception as exc:
+                self._mark_health_reconnect_fail(sensor.address)
                 self._set_row_state(sensor.address, "ERREUR")
                 self._log(f"<span style='color:#f38ba8'>✖ Échec reconnexion de {sensor.address} : {exc}</span>")
                 # On purge la connexion
@@ -630,6 +639,8 @@ class MainWindow(QMainWindow):
         if self._sensors:
             await asyncio.gather(*[s.disconnect() for s in self._sensors], return_exceptions=True)
             self._sensors = []
+            self._recording_sensors = []
+            self._last_degraded_excluded = set()
 
         # Marquer tous les capteurs "Connecting" immédiatement
         for d in self._devices:
@@ -660,6 +671,9 @@ class MainWindow(QMainWindow):
 
         results = await asyncio.gather(*[_c(d) for d in self._devices])
         self._sensors = [s for s in results if s is not None]
+
+        for sensor in self._sensors:
+            self._touch_sensor_health(sensor.address)
 
         n = len(self._sensors)
         adap_dist: dict[str, int] = {}
@@ -877,6 +891,8 @@ class MainWindow(QMainWindow):
             # Retirer de la liste active les capteurs effectivement déconnectés
             self._sensors = [s for s in self._sensors if s.is_active]
             self._recording_sensors = [s for s in self._recording_sensors if s.is_active]
+            for sensor in targets:
+                self._mark_health_drop(sensor.address)
 
             self._log(f"<span style='color:#a6e3a1'>Déconnectés : {disconnected}/{len(targets)}</span>")
             self._set_status(f"{len(self._sensors)} connecté(s)")
@@ -1243,9 +1259,47 @@ class MainWindow(QMainWindow):
             f"<span style='color:#6c7086'>[{ts}]</span> {msg}"
         )
 
+    def _touch_sensor_health(self, address: str) -> dict[str, int]:
+        key = address.upper()
+        if key not in self._sensor_health:
+            self._sensor_health[key] = {"drops": 0, "reconnect_ok": 0, "reconnect_fail": 0}
+        return self._sensor_health[key]
+
+    def _mark_health_drop(self, address: str) -> None:
+        rec = self._touch_sensor_health(address)
+        rec["drops"] += 1
+
+    def _mark_health_reconnect(self, address: str) -> None:
+        rec = self._touch_sensor_health(address)
+        rec["reconnect_ok"] += 1
+
+    def _mark_health_reconnect_fail(self, address: str) -> None:
+        rec = self._touch_sensor_health(address)
+        rec["reconnect_fail"] += 1
+
+    def _health_suffix(self) -> str:
+        if not self._sensor_health:
+            return "Santé: OK"
+
+        drops = sum(v["drops"] for v in self._sensor_health.values())
+        reconnect_fail = sum(v["reconnect_fail"] for v in self._sensor_health.values())
+        unstable = sum(
+            1
+            for v in self._sensor_health.values()
+            if (v["drops"] + v["reconnect_fail"]) >= 2
+        )
+
+        if reconnect_fail > 0:
+            return f"Santé: CRITIQUE ({reconnect_fail} échec(s) reconnexion)"
+        if unstable > 0:
+            return f"Santé: SURVEILLANCE ({unstable} capteur(s) instable(s))"
+        if drops > 0:
+            return f"Santé: DÉGRADÉE ({drops} coupure(s))"
+        return "Santé: OK"
+
     def _set_status(self, msg: str) -> None:
         n = len(self._sensors)
-        self._lbl_status.setText(f"{n} capteur(s) connecté(s)  —  {msg}")
+        self._lbl_status.setText(f"{n} capteur(s) connecté(s)  —  {msg}  —  {self._health_suffix()}")
 
     def _set_busy(self, busy: bool) -> None:
         """Désactive les boutons pendant une opération.
@@ -1272,6 +1326,7 @@ class MainWindow(QMainWindow):
                 f"et retirés : {addrs}</span>"
             )
             for s in lost:
+                self._mark_health_reconnect_fail(s.address)
                 self._set_row_state(s.address, "ERREUR")
             self._sensors = [s for s in self._sensors if s.is_active]
             self._recording_sensors = [s for s in self._recording_sensors if s.is_active]
