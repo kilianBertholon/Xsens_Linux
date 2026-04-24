@@ -141,13 +141,12 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick_timer)
 
-        self._battery_timer = QTimer(self)
-        self._battery_timer.timeout.connect(self._poll_battery)
-        self._battery_timer.start(10000)  # Toutes les 10 secondes
-
         self._build_ui()
         self._refresh_adapter_indicator()
         self._log("Xsens DOT Manager démarré.")
+        
+        # Lancer la boucle de batterie
+        asyncio.ensure_future(self._battery_loop())
         self._refresh_buttons()
 
     # ── Construction UI ───────────────────────────────────────────────────
@@ -1066,21 +1065,23 @@ class MainWindow(QMainWindow):
             m, s = divmod(r, 60)
             self._lbl_timer.setText(f"⏺ {h:02d}:{m:02d}:{s:02d}")
 
-    def _poll_battery(self) -> None:
+    async def _battery_loop(self) -> None:
         """Poll le niveau de batterie en arrière-plan."""
-        if self._is_busy or self._recording:
-            return
-        
-        async def _fetch():
+        while True:
+            await asyncio.sleep(10.0)
+            if self._is_busy or self._recording:
+                continue
+            
             to_poll = [s for s in self._sensors if s.is_connected]
             for s in to_poll:
                 if self._is_busy or self._recording or not s.is_connected:
                     break
-                b = await s.cmd_get_battery()
-                if b is not None:
-                    self._set_row_battery(s.address, b)
-        
-        asyncio.create_task(_fetch())
+                try:
+                    b = await s.cmd_get_battery()
+                    if b is not None:
+                        self._set_row_battery(s.address, b)
+                except Exception:
+                    pass
 
     def _set_row_state(self, address: str, state: str) -> None:
         for row in range(self._table.rowCount()):
