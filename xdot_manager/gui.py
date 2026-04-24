@@ -308,8 +308,10 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         action = dlg.selected_action()
+        if action is None:
+            return
         # Lancer l'action correspondante de manière async
-        asyncio.ensure_future(self._execute_tests_action(action))
+        asyncio.create_task(self._execute_tests_action(action))
 
     async def _execute_tests_action(self, action: str) -> None:
         """Exécute l'action sélectionnée (async)."""
@@ -533,7 +535,10 @@ class MainWindow(QMainWindow):
         for adapter_name, group in sorted(by_adapter.items()):
             ordered = sorted(
                 group,
-                key=lambda sensor: rssi_by_addr.get(sensor.address.upper(), -127),
+                key=lambda sensor: (
+                    self._health_score_value(sensor.address),
+                    rssi_by_addr.get(sensor.address.upper(), -127),
+                ),
                 reverse=True,
             )
             keep = ordered[:_SAFE_SENSORS_PER_ADAPTER]
@@ -1271,6 +1276,9 @@ class MainWindow(QMainWindow):
             self._sensor_health[key] = {"drops": 0, "reconnect_ok": 0, "reconnect_fail": 0}
         return self._sensor_health[key]
 
+    def _health_key(self, address: str) -> str:
+        return address.upper()
+
     def _mark_health_drop(self, address: str) -> None:
         rec = self._touch_sensor_health(address)
         rec["drops"] += 1
@@ -1308,33 +1316,45 @@ class MainWindow(QMainWindow):
 
     def _health_score_cell(self, address: str) -> QTableWidgetItem:
         """Retourne une cellule avec le score de stabilité (0-5 étoiles)."""
-        if address not in self._sensor_health:
-            # Aucun problème enregistré
-            cell = QTableWidgetItem("⭐⭐⭐⭐⭐ OK")
+        key = self._health_key(address)
+        h = self._sensor_health.get(key)
+
+        if not h:
+            cell = QTableWidgetItem("100% OK")
+            cell.setToolTip("Aucun incident enregistré")
             cell.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
-            cell.setForeground(QColor("#27ae60"))  # vert
+            cell.setForeground(QColor("#27ae60"))
             return cell
-        
-        h = self._sensor_health[address]
-        issues = h["drops"] + h["reconnect_fail"]
-        
-        if issues == 0:
-            text = "⭐⭐⭐⭐⭐ OK"
-            color = "#27ae60"  # vert
-        elif issues == 1:
-            text = "⭐⭐⭐⭐☆ Vigilance"
-            color = "#f39c12"  # orange
-        elif issues == 2:
-            text = "⭐⭐⭐☆☆ Instable"
-            color = "#e67e22"  # orange foncé
-        elif issues <= 4:
-            text = f"⭐⭐☆☆☆ Problème ({issues})"
-            color = "#e74c3c"  # rouge clair
+
+        drops = h["drops"]
+        reconnect_ok = h["reconnect_ok"]
+        reconnect_fail = h["reconnect_fail"]
+        score = max(0, 100 - (drops * 15) - (reconnect_fail * 35))
+
+        if score >= 95:
+            text = f"{score:3d}% OK"
+            color = "#27ae60"
+        elif score >= 80:
+            text = f"{score:3d}% Vigilance"
+            color = "#f39c12"
+        elif score >= 60:
+            text = f"{score:3d}% Instable"
+            color = "#e67e22"
+        elif score >= 30:
+            text = f"{score:3d}% Problème"
+            color = "#e74c3c"
         else:
-            text = f"⭐☆☆☆☆ Critique ({issues})"
-            color = "#c0392b"  # rouge foncé
-        
+            text = f"{score:3d}% Critique"
+            color = "#c0392b"
+
         cell = QTableWidgetItem(text)
+        cell.setToolTip(
+            f"{address.upper()}\n"
+            f"Coupures: {drops}\n"
+            f"Reconnexions OK: {reconnect_ok}\n"
+            f"Échecs reconnexion: {reconnect_fail}\n"
+            f"Score: {score}/100"
+        )
         cell.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
         cell.setForeground(QColor(color))
         f = QFont()
@@ -1342,12 +1362,20 @@ class MainWindow(QMainWindow):
         cell.setFont(f)
         return cell
 
+    def _health_score_value(self, address: str) -> int:
+        """Retourne un score numérique de santé pour le tri (0-100)."""
+        h = self._sensor_health.get(self._health_key(address))
+        if not h:
+            return 100
+        return max(0, 100 - (h["drops"] * 15) - (h["reconnect_fail"] * 35))
+
     def _update_health_cell(self, address: str) -> None:
         """Met à jour la cellule de santé pour un capteur donné."""
+        key = self._health_key(address)
         for row in range(self._table.rowCount()):
             item = self._table.item(row, 1)
-            if item and item.text() == address:
-                self._table.setItem(row, 7, self._health_score_cell(address))
+            if item and item.text().upper() == key:
+                self._table.setItem(row, 7, self._health_score_cell(key))
                 break
 
     def _set_status(self, msg: str) -> None:

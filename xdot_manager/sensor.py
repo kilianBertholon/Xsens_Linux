@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Callable, Optional
 
-from bleak import BleakClient, BleakError
+from bleak import BleakClient
+from bleak.exc import BleakError
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
 from .adapters import BtAdapter
@@ -134,7 +135,8 @@ class DotSensor:
         if "not connected" in err_msg or "unreachable" in err_msg or "unlikely error" in err_msg:
             if self.state != DotState.DISCONNECTED:
                 logger.warning("[%s] Erreur GATT fatale détectée (%s) -> Force déconnexion.", self.name, exc)
-                self._bleak_disconnected_cb(self._client)
+                if self._client is not None:
+                    self._bleak_disconnected_cb(self._client)
 
     def _bleak_disconnected_cb(self, client: BleakClient) -> None:
         """Callback interne de Bleak en cas de déconnexion."""
@@ -182,13 +184,19 @@ class DotSensor:
                     "[%s] Connexion tentative %d/%d (adapter=%s)...",
                     self.name, attempt, CONNECT_RETRIES, adapter_id,
                 )
-                kwargs = {"timeout": CONNECT_TIMEOUT}
                 if adapter_id:
-                    kwargs["adapter"] = adapter_id
-                
-                kwargs["disconnected_callback"] = self._bleak_disconnected_cb
-
-                client = BleakClient(self.address, **kwargs)
+                    client = BleakClient(
+                        self.address,
+                        timeout=CONNECT_TIMEOUT,
+                        adapter=adapter_id,
+                        disconnected_callback=self._bleak_disconnected_cb,
+                    )
+                else:
+                    client = BleakClient(
+                        self.address,
+                        timeout=CONNECT_TIMEOUT,
+                        disconnected_callback=self._bleak_disconnected_cb,
+                    )
                 async with sem:
                     await client.connect()
                     # Vérifier que les services GATT sont bien découverts
