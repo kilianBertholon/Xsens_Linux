@@ -214,6 +214,12 @@ Le `timestamp` est en **microsecondes** (entier 64 bits, base interne DOT).
 - En cas de déconnexions répétées, réduire temporairement le nombre de capteurs
     par adaptateur.
 
+### Optimisation charge BLE (GUI)
+
+- La colonne **Batterie** est masquée dans l'interface principale.
+- Le polling périodique du niveau batterie est désactivé pour réduire la charge
+    GATT et privilégier la stabilité des opérations critiques (sync / start / stop / export).
+
 ### Capteur non détecté au scan
 
 ```bash

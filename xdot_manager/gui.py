@@ -153,9 +153,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_adapter_indicator()
         self._log("Xsens DOT Manager démarré.")
-        
-        # Lancer la boucle de batterie
-        asyncio.ensure_future(self._battery_loop())
         self._refresh_buttons()
 
     # ── Construction UI ───────────────────────────────────────────────────
@@ -285,6 +282,7 @@ class MainWindow(QMainWindow):
         t.setColumnWidth(4, 80)
         t.setColumnWidth(5, 120)
         t.setColumnWidth(7, 140)  # Santé
+        t.setColumnHidden(5, True)
         return t
 
     # ── Boutons → coroutines ──────────────────────────────────────────────
@@ -622,13 +620,6 @@ class MainWindow(QMainWindow):
                     self._set_row_state(sensor.address, STATE_NAMES.get(st, f"0x{st:02x}"))
                 except Exception:
                     self._set_row_state(sensor.address, "Idle")
-                    
-                try:
-                    b = await sensor.cmd_get_battery()
-                    if b is not None:
-                        self._set_row_battery(sensor.address, b)
-                except Exception:
-                    pass
 
                 self._mark_health_reconnect(sensor.address)
                 self._log(f"<span style='color:#a6e3a1'>✔ <b>{sensor.address}</b> reconnecté automatiquement.</span>")
@@ -672,13 +663,6 @@ class MainWindow(QMainWindow):
                     self._set_row_state(s.address, STATE_NAMES.get(st, f"0x{st:02x}"))
                 except Exception:
                     self._set_row_state(s.address, "Idle")
-
-                try:
-                    b = await s.cmd_get_battery()
-                    if b is not None:
-                        self._set_row_battery(s.address, b)
-                except Exception:
-                    pass
                 return s
             except DotConnectError as exc:
                 self._log(f"  <span style='color:#f38ba8'>{d.address} : {exc}</span>")
@@ -1239,24 +1223,6 @@ class MainWindow(QMainWindow):
             m, s = divmod(r, 60)
             self._lbl_timer.setText(f"⏺ {h:02d}:{m:02d}:{s:02d}")
 
-    async def _battery_loop(self) -> None:
-        """Poll le niveau de batterie en arrière-plan."""
-        while True:
-            await asyncio.sleep(10.0)
-            if self._is_busy or self._recording:
-                continue
-            
-            to_poll = [s for s in self._sensors if s.is_connected]
-            for s in to_poll:
-                if self._is_busy or self._recording or not s.is_connected:
-                    break
-                try:
-                    b = await s.cmd_get_battery()
-                    if b is not None:
-                        self._set_row_battery(s.address, b)
-                except Exception:
-                    pass
-
     def _set_row_state(self, address: str, state: str) -> None:
         key = address.upper()
         for row in range(self._table.rowCount()):
@@ -1264,13 +1230,6 @@ class MainWindow(QMainWindow):
             if item and item.text().upper() == key:
                 self._table.setItem(row, 6, _state_cell(state))
                 self._table.setItem(row, 7, self._health_score_cell(key))
-                break
-
-    def _set_row_battery(self, address: str, level: int) -> None:
-        for row in range(self._table.rowCount()):
-            item = self._table.item(row, 1)
-            if item and item.text() == address:
-                self._table.setItem(row, 5, _cell(f"{level}%", align=Qt.AlignmentFlag.AlignCenter))
                 break
 
     def _log(self, msg: str) -> None:
