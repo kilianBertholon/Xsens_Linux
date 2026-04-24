@@ -487,7 +487,20 @@ class MainWindow(QMainWindow):
             try:
                 await asyncio.sleep(2.0) # Petit délai de stabilisation
                 await sensor.connect()
-                self._set_row_state(sensor.address, "Idle")
+                
+                try:
+                    st = await sensor.cmd_get_state()
+                    self._set_row_state(sensor.address, STATE_NAMES.get(st, f"0x{st:02x}"))
+                except Exception:
+                    self._set_row_state(sensor.address, "Idle")
+                    
+                try:
+                    b = await sensor.cmd_get_battery()
+                    if b is not None:
+                        self._set_row_battery(sensor.address, b)
+                except Exception:
+                    pass
+
                 self._log(f"<span style='color:#a6e3a1'>✔ <b>{sensor.address}</b> reconnecté automatiquement.</span>")
                 self._refresh_adapter_indicator()
                 self._refresh_buttons()
@@ -526,6 +539,13 @@ class MainWindow(QMainWindow):
                     self._set_row_state(s.address, STATE_NAMES.get(st, f"0x{st:02x}"))
                 except Exception:
                     self._set_row_state(s.address, "Idle")
+
+                try:
+                    b = await s.cmd_get_battery()
+                    if b is not None:
+                        self._set_row_battery(s.address, b)
+                except Exception:
+                    pass
                 return s
             except DotConnectError as exc:
                 self._log(f"  <span style='color:#f38ba8'>{d.address} : {exc}</span>")
