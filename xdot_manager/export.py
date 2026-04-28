@@ -131,7 +131,7 @@ _TYPE_SIZE = {name: info[1] for name, info in EXPORT_DATA_TYPES.items()}
 
 # En-têtes CSV par type
 _CSV_HEADERS: dict[str, list[str]] = {
-    "timestamp":  ["timestamp_ms"],
+    "timestamp":  ["PacketCounter", "SampleTimeFine", "timestamp_ms"],
     "euler":      ["roll_deg", "pitch_deg", "yaw_deg"],
     "acc":        ["acc_x", "acc_y", "acc_z"],
     "ang_vel":    ["gyr_x", "gyr_y", "gyr_z"],
@@ -153,10 +153,14 @@ def _parse_sample(data: bytes, types: list[str]) -> list[float]:
     for t in types:
         size = _TYPE_SIZE[t]
         if t == "timestamp":
-            # uint32 little-endian, en ms
-            val = struct.unpack_from("<I", data, offset)[0]
-            values.append(float(val))
-            offset += 4
+            # Couple uint32 little-endian : (PacketCounter, SampleTimeFine)
+            packet_counter, sample_time_fine = struct.unpack_from("<II", data, offset)
+            values.extend([
+                float(packet_counter),
+                float(sample_time_fine),
+                float(sample_time_fine) / 1000.0,
+            ])
+            offset += 8
         elif t in ("euler", "acc", "ang_vel", "free_acc", "imu_raw"):
             # 3 floats 32 bits
             x, y, z = struct.unpack_from("<fff", data, offset)

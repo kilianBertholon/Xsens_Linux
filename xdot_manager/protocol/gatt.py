@@ -141,7 +141,9 @@ PAYLOAD_CUSTOM3     = 0x66
 # Chaque entrée : (code_byte, taille_en_octets)
 # ---------------------------------------------------------------------------
 EXPORT_DATA_TYPES = {
-    "timestamp":   (0x00, 4),   # uint32 µs
+    # Type 0x00 contient un couple (PacketCounter, SampleTimeFine) en uint32 LE.
+    # On le mappe sous le nom historique "timestamp" pour conserver l'API existante.
+    "timestamp":   (0x00, 8),
     "quaternion":  (0x01, 16),  # 4×float (w,x,y,z)
     "euler":       (0x04, 12),  # 3×float degrés
     "acc":         (0x07, 12),  # 3×float m/s²

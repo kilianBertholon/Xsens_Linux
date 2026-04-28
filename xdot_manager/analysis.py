@@ -80,19 +80,33 @@ class JitterResult:
 
 def _read_first_timestamp(csv_path: Path) -> Optional[float]:
     """
-    Lit la valeur de la colonne 'timestamp_ms' de la première ligne de données.
+    Lit la première valeur temporelle disponible de la première ligne de données.
+    Colonnes testées (dans l'ordre) : timestamp_ms, SampleTimeFine, sample_time_fine, timestamp_us, PacketCounter, packet_counter.
     Retourne None si la colonne est absente ou le fichier vide.
     """
     try:
         with open(csv_path, newline="") as f:
             reader = csv.DictReader(f)
-            if reader.fieldnames is None or "timestamp_ms" not in reader.fieldnames:
-                logger.debug("Pas de colonne timestamp_ms dans %s", csv_path.name)
+            if reader.fieldnames is None:
+                logger.debug("Pas d'en-tête CSV lisible dans %s", csv_path.name)
+                return None
+            preferred_cols = (
+                "timestamp_ms",
+                "SampleTimeFine",
+                "sample_time_fine",
+                "timestamp_us",
+                "PacketCounter",
+                "packet_counter",
+            )
+            available_cols = [col for col in preferred_cols if col in reader.fieldnames]
+            if not available_cols:
+                logger.debug("Pas de colonne temporelle reconnue dans %s", csv_path.name)
                 return None
             for row in reader:
-                val = row.get("timestamp_ms", "").strip()
-                if val:
-                    return float(val)
+                for col in available_cols:
+                    val = row.get(col, "").strip()
+                    if val:
+                        return float(val)
     except Exception as exc:
         logger.warning("Impossible de lire %s : %s", csv_path, exc)
     return None
@@ -116,7 +130,7 @@ def _first_timestamp_for_address(output_dir: Path, addr: str) -> tuple[Optional[
 
     if not existing_files:
         return None, "Aucun fichier CSV trouvé (file01..file19)"
-    return None, "CSV trouvé(s) mais sans colonne/valeur timestamp_ms lisible"
+    return None, "CSV trouvé(s) mais sans colonne temporelle lisible (timestamp_ms/sample_time_fine/...)"
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +189,7 @@ def analyze_sync_jitter(
             "Analyse impossible : moins de 2 capteurs avec timestamp exploitable."
         )
         result.diagnostics.append(
-            "Vérifier qu'un export a été fait et que le payload inclut la colonne timestamp_ms."
+            "Vérifier qu'un export a été fait et que le payload inclut une colonne temporelle (timestamp_ms ou sample_time_fine)."
         )
     elif result.jitter_max_ms > JITTER_THRESHOLD_MS:
         result.diagnostics.append(
