@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import struct
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -411,7 +413,12 @@ async def _export_file(
     # --- file data ---
     addr_clean = sensor.address.replace(":", "-")
     out_path = output_dir / f"{addr_clean}_file{file_idx:02d}.csv"
+    meta_path = out_path.with_suffix(".json")
     samples_written = 0
+    first_packet_counter: Optional[int] = None
+    first_sample_time_fine: Optional[float] = None
+    last_packet_counter: Optional[int] = None
+    last_sample_time_fine: Optional[float] = None
 
     await sensor.write_command(request_file_data(file_idx), critical=False)
 
@@ -444,6 +451,14 @@ async def _export_file(
                     for i in range(n_samples):
                         chunk = payload[i * sample_size: (i + 1) * sample_size]
                         row = _parse_sample(chunk, data_types)
+                        if "timestamp" in data_types and len(row) >= 3:
+                            packet_counter = int(row[0])
+                            sample_time_fine = float(row[1])
+                            if first_packet_counter is None:
+                                first_packet_counter = packet_counter
+                                first_sample_time_fine = sample_time_fine
+                            last_packet_counter = packet_counter
+                            last_sample_time_fine = sample_time_fine
                         writer.writerow([f"{v:.6g}" for v in row])
                         samples_written += 1
 
@@ -455,12 +470,59 @@ async def _export_file(
                     sensor.name, reid,
                 )
 
+    _write_export_sidecar(
+        meta_path,
+        sensor,
+        file_idx,
+        out_path,
+        data_types,
+        samples_written,
+        time.monotonic() - t0,
+        first_packet_counter,
+        first_sample_time_fine,
+        last_packet_counter,
+        last_sample_time_fine,
+    )
+
     return FileExportResult(
         file_index=file_idx,
         sample_count=samples_written,
         output_path=out_path,
         duration_s=time.monotonic() - t0,
     )
+
+
+def _write_export_sidecar(
+    meta_path: Path,
+    sensor: DotSensor,
+    file_idx: int,
+    output_path: Path,
+    data_types: list[str],
+    sample_count: int,
+    duration_s: float,
+    first_packet_counter: Optional[int],
+    first_sample_time_fine: Optional[float],
+    last_packet_counter: Optional[int],
+    last_sample_time_fine: Optional[float],
+) -> None:
+    payload = {
+        "address": sensor.address,
+        "name": sensor.name,
+        "file_index": file_idx,
+        "output_csv": output_path.name,
+        "data_types": data_types,
+        "sample_count": sample_count,
+        "duration_s": round(duration_s, 3),
+        "packet_counter_start": first_packet_counter,
+        "packet_counter_end": last_packet_counter,
+        "sample_time_fine_start": first_sample_time_fine,
+        "sample_time_fine_end": last_sample_time_fine,
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("[%s] Impossible d'écrire le sidecar %s : %s", sensor.name, meta_path.name, exc)
 
 
 async def export_sensor_files(
