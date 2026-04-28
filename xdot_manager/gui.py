@@ -8,6 +8,8 @@ Usage :
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import re
 import signal
 import subprocess
@@ -33,6 +35,8 @@ from .adapters import list_adapters, recommended_max_per_adapter
 from .protocol.gatt import STATE_NAMES, STATE_IDLE, STATE_RECORDING, STATE_ERASING
 from .scanner import scan_for_dots
 from .sensor import DotSensor, DotConnectError, DotError
+
+logger = logging.getLogger(__name__)
 
 # ── Constantes visuelles ──────────────────────────────────────────────────────
 
@@ -126,6 +130,7 @@ class MainWindow(QMainWindow):
         self._is_busy = False
         self._recording_start: Optional[datetime] = None
         self._output_dir = Path("./xdot_export")
+        self._debug_enabled = os.getenv("XDOT_GUI_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
 
         # Santé opérationnelle (déconnexions/reconnexions)
         self._sensor_health: dict[str, dict[str, int]] = {}
@@ -151,6 +156,7 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._tick_timer)
 
         self._build_ui()
+        self._apply_debug_mode(self._debug_enabled, announce=False)
         self._refresh_adapter_indicator()
         self._log("Xsens DOT Manager démarré.")
         self._refresh_buttons()
@@ -263,6 +269,12 @@ class MainWindow(QMainWindow):
         self._lbl_adapters.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self._lbl_adapters)
 
+        self._chk_debug = QCheckBox("Debug")
+        self._chk_debug.setChecked(self._debug_enabled)
+        self._chk_debug.setToolTip("Active les logs DEBUG xdot_manager")
+        self._chk_debug.toggled.connect(self._on_toggle_debug)
+        layout.addWidget(self._chk_debug)
+
         return frame
 
     def _make_table(self) -> QTableWidget:
@@ -299,6 +311,28 @@ class MainWindow(QMainWindow):
     def _on_analyse(self)     : self._show_jitter_dialog()
     def _on_campaign(self)    : asyncio.ensure_future(self._campaign())
     def _on_refresh_adapters(self): self._refresh_adapter_indicator(log=True)
+
+    def _on_toggle_debug(self, enabled: bool) -> None:
+        self._apply_debug_mode(enabled, announce=True)
+
+    def _apply_debug_mode(self, enabled: bool, announce: bool = True) -> None:
+        self._debug_enabled = enabled
+        level = logging.DEBUG if enabled else logging.INFO
+
+        root_logger = logging.getLogger()
+        root_logger.setLevel(level)
+
+        # Forcer nos modules applicatifs au niveau demandé
+        app_logger = logging.getLogger("xdot_manager")
+        app_logger.setLevel(level)
+
+        # Garder les libs externes bavardes sous contrôle
+        for noisy in ("bleak", "bleak.backends", "dbus_next"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
+        if announce:
+            mode = "ACTIVÉ" if enabled else "DÉSACTIVÉ"
+            self._log(f"Mode debug {mode} (niveau logs: {'DEBUG' if enabled else 'INFO'})")
 
     def _show_tests_dialog_sync(self) -> None:
         """Affiche le dialogue des outils de test (synchrone) et lance l'action correspondante."""

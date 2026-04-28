@@ -105,6 +105,14 @@ sudo rfkill unblock bluetooth
 bash launch_gui.sh
 ```
 
+Mode debug GUI :
+- case `Debug` disponible dans la barre d'outils (activation à chaud)
+- ou variable d'environnement au démarrage :
+
+```bash
+XDOT_GUI_DEBUG=1 bash launch_gui.sh
+```
+
 ### Interface en ligne de commande
 
 ```bash
