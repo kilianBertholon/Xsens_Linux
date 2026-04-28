@@ -220,17 +220,17 @@ async def export_sensor(
 
     try:
         # 1. Activer les notifications
-        await sensor.subscribe_notifications()
+        await sensor.subscribe_notifications(critical=False)
         await sensor.drain_notifications()
 
         # 2. Vérifier l'état
-        state = await sensor.cmd_get_state()
+        state = await sensor.cmd_get_state(critical=False)
         if state == STATE_RECORDING:
             raise DotError(f"[{sensor.name}] Capteur en cours d'enregistrement — arrêter d'abord.")
         logger.info("[%s] État = %#04x — début export", sensor.name, state)
 
         # 3. Sélectionner les types de données
-        await sensor.send_and_ack(select_export_data(data_types))
+        await sensor.send_and_ack(select_export_data(data_types), critical=False)
 
         # 4. Récupérer la liste des fichiers
         file_count = await _get_flash_info(sensor)
@@ -256,7 +256,7 @@ async def export_sensor(
             )
 
         # 6. Arrêter l'export
-        await sensor.write_command(stop_export_data())
+        await sensor.write_command(stop_export_data(), critical=False)
 
         result.success = all(f.ok for f in result.files)
 
@@ -264,14 +264,14 @@ async def export_sensor(
         result.error = str(exc)
         logger.error("[%s] Export échoué : %s", sensor.name, exc)
         try:
-            await sensor.write_command(stop_export_data())
+            await sensor.write_command(stop_export_data(), critical=False)
         except Exception:
             pass
     except Exception as exc:
         result.error = f"Erreur inattendue : {exc}"
         logger.exception("[%s] Export : erreur inattendue", sensor.name)
     finally:
-        await sensor.unsubscribe_notifications()
+        await sensor.unsubscribe_notifications(critical=False)
         sensor.state = DotState.CONNECTED
 
     result.duration_s = time.monotonic() - t0
@@ -284,7 +284,7 @@ async def _get_flash_info(sensor: DotSensor) -> int:
     Envoie request_flash_info() et collecte les notifications 0x51/0x52.
     Retourne le nombre de fichiers en flash.
     """
-    await sensor.write_command(request_flash_info())
+    await sensor.write_command(request_flash_info(), critical=False)
 
     file_count = 0
     deadline = time.monotonic() + DATA_TIMEOUT
@@ -313,7 +313,7 @@ async def _get_file_metadata(sensor: DotSensor, file_idx: int) -> Optional[FileM
     Récupère les métadonnées d'un fichier (sample_count, start_ts) via request_file_info.
     Retourne None si le fichier est introuvable.
     """
-    await sensor.write_command(request_file_info(file_idx))
+    await sensor.write_command(request_file_info(file_idx), critical=False)
     sample_count = 0
     start_ts = 0
     deadline = time.monotonic() + DATA_TIMEOUT
@@ -349,7 +349,7 @@ async def get_flash_metadata(sensor: DotSensor) -> list[FileMetadata]:
     """
     sensor.state = DotState.EXPORTING
     try:
-        await sensor.subscribe_notifications()
+        await sensor.subscribe_notifications(critical=False)
         await sensor.drain_notifications()
         try:
             file_count = await _get_flash_info(sensor)
@@ -358,10 +358,10 @@ async def get_flash_metadata(sensor: DotSensor) -> list[FileMetadata]:
                 meta = await _get_file_metadata(sensor, i)
                 if meta is not None:
                     files.append(meta)
-            await sensor.write_command(stop_export_data())
+            await sensor.write_command(stop_export_data(), critical=False)
             return files
         finally:
-            await sensor.unsubscribe_notifications()
+            await sensor.unsubscribe_notifications(critical=False)
     finally:
         sensor.state = DotState.CONNECTED
 
@@ -377,7 +377,7 @@ async def _export_file(
     t0 = time.monotonic()
 
     # --- file info ---
-    await sensor.write_command(request_file_info(file_idx))
+    await sensor.write_command(request_file_info(file_idx), critical=False)
     sample_count = 0
     deadline = time.monotonic() + DATA_TIMEOUT
 
@@ -409,7 +409,7 @@ async def _export_file(
     out_path = output_dir / f"{addr_clean}_file{file_idx:02d}.csv"
     samples_written = 0
 
-    await sensor.write_command(request_file_data(file_idx))
+    await sensor.write_command(request_file_data(file_idx), critical=False)
 
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -484,14 +484,14 @@ async def export_sensor_files(
     result = SensorExportResult(address=sensor.address, success=False)
 
     try:
-        await sensor.subscribe_notifications()
+        await sensor.subscribe_notifications(critical=False)
         await sensor.drain_notifications()
 
-        state = await sensor.cmd_get_state()
+        state = await sensor.cmd_get_state(critical=False)
         if state == STATE_RECORDING:
             raise DotError(f"[{sensor.name}] Capteur en cours d'enregistrement — arrêter d'abord.")
 
-        await sensor.send_and_ack(select_export_data(data_types))
+        await sensor.send_and_ack(select_export_data(data_types), critical=False)
 
         file_count = await _get_flash_info(sensor)
         if file_count == 0:
@@ -515,21 +515,21 @@ async def export_sensor_files(
                 sensor.name, file_idx, file_count, file_result.sample_count,
             )
 
-        await sensor.write_command(stop_export_data())
+        await sensor.write_command(stop_export_data(), critical=False)
         result.success = all(f.ok for f in result.files)
 
     except DotError as exc:
         result.error = str(exc)
         logger.error("[%s] Export échoué : %s", sensor.name, exc)
         try:
-            await sensor.write_command(stop_export_data())
+            await sensor.write_command(stop_export_data(), critical=False)
         except Exception:
             pass
     except Exception as exc:
         result.error = f"Erreur inattendue : {exc}"
         logger.exception("[%s] Export : erreur inattendue", sensor.name)
     finally:
-        await sensor.unsubscribe_notifications()
+        await sensor.unsubscribe_notifications(critical=False)
         sensor.state = DotState.CONNECTED
 
     result.duration_s = time.monotonic() - t0

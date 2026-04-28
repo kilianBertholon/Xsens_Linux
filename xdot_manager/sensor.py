@@ -42,17 +42,22 @@ from .protocol.commands import (
 
 logger = logging.getLogger(__name__)
 
-# Semaphores par adaptateur — BlueZ refuse les connexions simultanées sur le même hciX.
-# Valeur 1 = sérialisation stricte ; augmenter si le firmware du dongle le supporte.
-_ADAPTER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
-_SEMAPHORE_CONCURRENCY = 1   # 1 connexion à la fois par adaptateur
+# Semaphores par adaptateur.
+# - critical=1 : opérations sensibles (sync/start/stop/state)
+# - bulk=2     : opérations non critiques (connexion/export)
+_ADAPTER_SEMAPHORES_CRITICAL: dict[str, asyncio.Semaphore] = {}
+_ADAPTER_SEMAPHORES_BULK: dict[str, asyncio.Semaphore] = {}
+_SEMAPHORE_CRITICAL_CONCURRENCY = 1
+_SEMAPHORE_BULK_CONCURRENCY = 2
 
 
-def _get_adapter_semaphore(adapter_name: str) -> asyncio.Semaphore:
+def _get_adapter_semaphore(adapter_name: str, *, critical: bool = True) -> asyncio.Semaphore:
     """Retourne (en créant si besoin) le sémaphore associé à un adaptateur."""
-    if adapter_name not in _ADAPTER_SEMAPHORES:
-        _ADAPTER_SEMAPHORES[adapter_name] = asyncio.Semaphore(_SEMAPHORE_CONCURRENCY)
-    return _ADAPTER_SEMAPHORES[adapter_name]
+    target = _ADAPTER_SEMAPHORES_CRITICAL if critical else _ADAPTER_SEMAPHORES_BULK
+    concurrency = _SEMAPHORE_CRITICAL_CONCURRENCY if critical else _SEMAPHORE_BULK_CONCURRENCY
+    if adapter_name not in target:
+        target[adapter_name] = asyncio.Semaphore(concurrency)
+    return target[adapter_name]
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +180,7 @@ class DotSensor:
         self.state = DotState.CONNECTING
 
         # Acquérir le sémaphore de l'adaptateur pour sérialiser les tentatives
-        sem = _get_adapter_semaphore(adapter_id or "default")
+        sem = _get_adapter_semaphore(adapter_id or "default", critical=False)
 
         last_exc: Optional[Exception] = None
         for attempt in range(1, CONNECT_RETRIES + 1):
@@ -259,7 +264,7 @@ class DotSensor:
             raise DotConnectError(f"[{self.name}] Non connecté.")
         return self._client
 
-    async def write_command(self, data: bytes, response: bool = False) -> None:
+    async def write_command(self, data: bytes, response: bool = False, critical: bool = True) -> None:
         """Écrit une trame sur MSG_CONTROL_UUID.
         response=False : write without response (défaut, plus rapide).
         response=True  : write with response (GATT ACK BlueZ, plus fiable).
@@ -267,7 +272,7 @@ class DotSensor:
         client = self._require_connected()
         # Sérialiser les accès GATT par adaptateur
         adapter_name = self.adapter.bleak_id if self.adapter else "local"
-        sem = _get_adapter_semaphore(adapter_name)
+        sem = _get_adapter_semaphore(adapter_name, critical=critical)
         try:
             async with sem:
                 await asyncio.wait_for(
@@ -281,14 +286,14 @@ class DotSensor:
             self._check_disconnect_error(exc)
             raise
 
-    async def read_ack(self) -> tuple[int, int, int]:
+    async def read_ack(self, critical: bool = True) -> tuple[int, int, int]:
         """
         Lit la réponse ACK sur MSG_ACK_UUID.
         Retourne (mid, reid, result). Lève DotAckError si result != SUCCESS.
         """
         client = self._require_connected()
         adapter_name = self.adapter.bleak_id if self.adapter else "local"
-        sem = _get_adapter_semaphore(adapter_name)
+        sem = _get_adapter_semaphore(adapter_name, critical=critical)
         try:
             async with sem:
                 raw = await asyncio.wait_for(
@@ -316,6 +321,7 @@ class DotSensor:
         retry_delay: float = 0.05,
         pre_delay: float = 0.0,
         write_with_response: bool = False,
+        critical: bool = True,
     ) -> tuple[int, int, int]:
         """Raccourci : write_command + read_ack avec validation du MID.
 
@@ -334,12 +340,12 @@ class DotSensor:
         expected_mid = data[0]   # MID byte en tête du message
         # Utiliser write-with-response pour les services critiques (Recording / Sync)
         use_response = write_with_response or (expected_mid in (MID_RECORDING, MID_SYNC))
-        await self.write_command(data, response=use_response)
+        await self.write_command(data, response=use_response, critical=critical)
         if pre_delay > 0.0:
             await asyncio.sleep(pre_delay)
         client = self._require_connected()
         adapter_name = self.adapter.bleak_id if self.adapter else "local"
-        sem = _get_adapter_semaphore(adapter_name)
+        sem = _get_adapter_semaphore(adapter_name, critical=critical)
         last_raw = b""
         # Timeout par lecture plus court pour éviter de bloquer longuement la boucle
         per_read_timeout = min(1.0, GATT_TIMEOUT)
@@ -386,21 +392,21 @@ class DotSensor:
         if self._notify_callback:
             self._notify_callback(raw)
 
-    async def subscribe_notifications(self) -> None:
+    async def subscribe_notifications(self, critical: bool = True) -> None:
         """Active les notifications sur MSG_NOTIFY_UUID."""
         client = self._require_connected()
         adapter_name = self.adapter.bleak_id if self.adapter else "local"
-        sem = _get_adapter_semaphore(adapter_name)
+        sem = _get_adapter_semaphore(adapter_name, critical=critical)
         async with sem:
             await client.start_notify(MSG_NOTIFY_UUID, self._on_notification)
         logger.debug("[%s] Notifications activées.", self.name)
 
-    async def unsubscribe_notifications(self) -> None:
+    async def unsubscribe_notifications(self, critical: bool = True) -> None:
         """Désactive les notifications."""
         if self._client and self._client.is_connected:
             try:
                 adapter_name = self.adapter.bleak_id if self.adapter else "local"
-                sem = _get_adapter_semaphore(adapter_name)
+                sem = _get_adapter_semaphore(adapter_name, critical=critical)
                 async with sem:
                     await self._client.stop_notify(MSG_NOTIFY_UUID)
             except Exception:
@@ -432,7 +438,7 @@ class DotSensor:
     # Commandes haut niveau
     # ------------------------------------------------------------------
 
-    async def cmd_get_state(self) -> int:
+    async def cmd_get_state(self, critical: bool = True) -> int:
         """
         Récupère l'état courant du capteur via GET_STATE (REID=0x02).
 
@@ -446,10 +452,10 @@ class DotSensor:
         implémentation lisait raw[4] et le comparait à STATE_SYNCING=0x02,
         générant des faux positifs permanents ("toujours en Syncing").
         """
-        await self.write_command(get_state())
+        await self.write_command(get_state(), critical=critical)
         client = self._require_connected()
         adapter_name = self.adapter.bleak_id if self.adapter else "local"
-        sem = _get_adapter_semaphore(adapter_name)
+        sem = _get_adapter_semaphore(adapter_name, critical=critical)
         # read under semaphore to serialize with writes
         try:
             async with sem:
