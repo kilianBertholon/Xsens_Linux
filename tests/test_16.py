@@ -12,6 +12,7 @@ Exécution :
 """
 import argparse
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -132,6 +133,62 @@ async def run(
         _separator(f"EXPORT FLASH → {output_dir}/")
         export_results = await export_all_sensors(sensors, output_dir, data_types)
         print_export_summary(export_results)
+
+        # --- Résumé JSON ---
+        summary_path = output_dir / "run_summary.json"
+        summary_payload = {
+            "duration_s": duration,
+            "payload": payload,
+            "output_dir": str(output_dir),
+            "scan_timeout_s": scan_timeout,
+            "max_per_adapter": max_per_adapter,
+            "devices_detected": len(devices),
+            "sensors_connected": len(sensors),
+            "sync": {
+                "success": sync_result.success,
+                "root_address": sync_result.root_address,
+                "duration_ms": sync_result.duration_ms,
+                "failed_sensors": sync_result.failed_sensors,
+                "errors": sync_result.errors,
+            },
+            "start": {
+                "success": start_r.success,
+                "jitter_ms": start_r.jitter_ms,
+                "failed_sensors": start_r.failed_sensors,
+                "errors": start_r.errors,
+            },
+            "stop": {
+                "success": stop_r.success,
+                "jitter_ms": stop_r.jitter_ms,
+                "failed_sensors": stop_r.failed_sensors,
+                "errors": stop_r.errors,
+            },
+            "exports": [
+                {
+                    "address": r.address,
+                    "success": r.success,
+                    "sample_count": r.total_samples,
+                    "duration_s": r.duration_s,
+                    "files": [
+                        {
+                            "index": f.file_index,
+                            "sample_count": f.sample_count,
+                            "csv": str(f.output_path) if f.output_path else None,
+                            "json_sidecar": str(f.output_path.with_suffix('.json')) if f.output_path else None,
+                            "duration_s": f.duration_s,
+                            "error": f.error,
+                        }
+                        for f in r.files
+                    ],
+                    "error": r.error,
+                }
+                for r in export_results
+            ],
+            "total_samples": sum(r.total_samples for r in export_results),
+            "ok_exports": sum(1 for r in export_results if r.success),
+        }
+        summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  Résumé JSON écrit : {summary_path}")
 
         # --- Rapport final ---
         _separator("RAPPORT FINAL")
