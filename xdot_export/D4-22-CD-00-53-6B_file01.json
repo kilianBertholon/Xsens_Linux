@@ -1,0 +1,17 @@
+{
+  "address": "D4:22:CD:00:53:6B",
+  "name": "53:6B",
+  "file_index": 1,
+  "output_csv": "D4-22-CD-00-53-6B_file01.csv",
+  "data_types": [
+    "timestamp",
+    "euler"
+  ],
+  "sample_count": 3153,
+  "duration_s": 94.741,
+  "packet_counter_start": 0,
+  "packet_counter_end": 3152,
+  "sample_time_fine_start": 541519479.0,
+  "sample_time_fine_end": 567785095.0,
+  "generated_utc": "2026-04-29T07:08:20.167933+00:00"
+}

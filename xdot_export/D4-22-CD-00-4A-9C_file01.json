@@ -1,0 +1,17 @@
+{
+  "address": "D4:22:CD:00:4A:9C",
+  "name": "4A:9C",
+  "file_index": 1,
+  "output_csv": "D4-22-CD-00-4A-9C_file01.csv",
+  "data_types": [
+    "timestamp",
+    "euler"
+  ],
+  "sample_count": 3324,
+  "duration_s": 106.021,
+  "packet_counter_start": 0,
+  "packet_counter_end": 3323,
+  "sample_time_fine_start": 534301967.0,
+  "sample_time_fine_end": 561992526.0,
+  "generated_utc": "2026-04-29T07:08:31.527332+00:00"
+}

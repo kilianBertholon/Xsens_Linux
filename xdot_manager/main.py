@@ -4,18 +4,20 @@ Point d'entrée CLI — xdot-manager.
 Sous-commandes :
   adapters          Lister les adaptateurs Bluetooth disponibles
   scan              Scanner et lister les capteurs Xsens DOT
+  check-utc         Vérifier la synchronisation UTC du système
   record            Synchroniser + démarrer/arrêter l'enregistrement
   export            Exporter la mémoire flash vers CSV
   full              Cycle complet : sync → record → stop → export
-    campaign          Campagne fiabilité (runs répétés)
+  campaign          Campagne fiabilité (runs répétés)
 
 Usage examples :
   xdot adapters
+  xdot check-utc
   xdot scan --timeout 8
   xdot record --duration 60 --payload euler
   xdot export --output ./data --payload quaternion
   xdot full --duration 30 --output ./data --payload euler
-    xdot campaign --runs 5 --duration 10 --expected-count 12
+  xdot campaign --runs 5 --duration 10 --expected-count 12
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ from .scanner import scan_for_dots, print_scan_results, DotDevice
 from .sensor import DotSensor, DotError, DotConnectError
 from .sync import synchronize_sensors, SyncResult
 from .recording import start_all, stop_all, wait_duration
+from .utc import get_utc_status, get_ntp_sync_commands
 from .export import export_all_sensors, print_export_summary, PRESET_EULER, PRESET_QUATERNION, PRESET_IMU, PRESET_FULL
 from .campaign import run_reliability_campaign, format_campaign_summary
 
@@ -157,6 +160,20 @@ async def cmd_record(args: argparse.Namespace) -> None:
         if sync_result.failed_sensors:
             print(f"  Capteurs non synchronisés : {sync_result.failed_sensors}")
 
+        # === Vérification UTC (robustesse) ===
+        print("Vérification synchronisation UTC système...")
+        utc_status = await get_utc_status()
+        print(f"  {utc_status}")
+        if not utc_status.is_synchronized or utc_status.drift_seconds > 1.0:
+            print("  ⚠️  Conseil: pour enregistrements long, synchronisez NTP")
+            print("    Commandes disponibles:")
+            commands = get_ntp_sync_commands()
+            for tool, cmds in commands.items():
+                print(f"    [{tool}]:")
+                for cmd in cmds:
+                    print(f"      {cmd}")
+        print()
+
         # Démarrage enregistrement
         start_result = await start_all(sensors)
         print(f"  {start_result}")
@@ -226,6 +243,17 @@ async def cmd_full(args: argparse.Namespace) -> None:
         sync_result = await synchronize_sensors(sensors, settle_time=2.0, verify_state=False)
         print(f"  {sync_result}\n")
 
+        # --- Vérification UTC ---
+        print("=" * 55)
+        print("VÉRIFICATION UTC (robustesse horloge)")
+        print("=" * 55)
+        utc_status = await get_utc_status()
+        print(f"  {utc_status}")
+        if not utc_status.is_synchronized or utc_status.drift_seconds > 1.0:
+            print("\n  ⚠️  Conseil: pour enregistrements long, synchronisez NTP")
+            print("     Voir: timedatectl set-ntp true")
+        print()
+
         # --- Start recording ---
         print("=" * 55)
         print("ÉTAPE 2 / 4 — Démarrage enregistrement")
@@ -281,6 +309,50 @@ async def cmd_campaign(args: argparse.Namespace) -> None:
     print()
     for line in format_campaign_summary(summary):
         print(line)
+
+
+async def cmd_check_utc(args: argparse.Namespace) -> None:
+    """Vérifie l'état de synchronisation UTC du système."""
+    print("=" * 60)
+    print("VÉRIFICATION UTC (ROBUSTESSE HORLOGE)")
+    print("=" * 60)
+    print()
+    
+    utc_status = await get_utc_status()
+    
+    # Afficher le statut
+    print(str(utc_status))
+    print()
+    
+    # Fournir des recommandations
+    severity = utc_status.severity()
+    if severity == "ERROR":
+        print("❌ ERREUR CRITIQUE — Impossible de vérifier l'UTC")
+        print("   Action: installez timedatectl ou ntpq")
+        sys.exit(1)
+    elif severity == "WARNING":
+        if not utc_status.is_synchronized:
+            print("⚠️  ACTION RECOMMANDÉE : Synchroniser NTP")
+            print()
+            commands = get_ntp_sync_commands()
+            for tool, cmds in commands.items():
+                print(f"   [{tool}]:")
+                for cmd in cmds:
+                    print(f"      {cmd}")
+        elif utc_status.drift_seconds > 1.0:
+            print("⚠️  ACTION RECOMMANDÉE : Corriger dérive UTC")
+            print(f"   Dérive actuelle : {utc_status.drift_seconds:.2f}s")
+            print()
+            print("   Essayez:")
+            print("      sudo timedatectl set-ntp true")
+            print("      sudo timedatectl set-time-zone UTC")
+    else:
+        print("✓ UTC est correctement synchronisé")
+        print(f"  Drift mesurés : {utc_status.drift_seconds:.3f}s")
+        print("  OK pour enregistrement synchronisé\n")
+        sys.exit(0)
+    
+    sys.exit(0 if severity == "OK" else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +437,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_campaign.add_argument("--max-per-adapter", type=int, default=SAFE_DEFAULT_MAX_PER_ADAPTER,
                             dest="max_per_adapter")
 
+    # check-utc
+    p_check_utc = sub.add_parser(
+        "check-utc",
+        help="Vérifier la synchronisation UTC du système (robustesse horloge)",
+    )
+
     return parser
 
 
@@ -373,12 +451,13 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 COMMANDS = {
-    "adapters": cmd_adapters,
-    "scan":     cmd_scan,
-    "record":   cmd_record,
-    "export":   cmd_export,
-    "full":     cmd_full,
-    "campaign": cmd_campaign,
+    "adapters":  cmd_adapters,
+    "scan":      cmd_scan,
+    "record":    cmd_record,
+    "export":    cmd_export,
+    "full":      cmd_full,
+    "campaign":  cmd_campaign,
+    "check-utc": cmd_check_utc,
 }
 
 

@@ -1,0 +1,17 @@
+{
+  "address": "D4:22:CD:00:53:67",
+  "name": "53:67",
+  "file_index": 1,
+  "output_csv": "D4-22-CD-00-53-67_file01.csv",
+  "data_types": [
+    "timestamp",
+    "euler"
+  ],
+  "sample_count": 2955,
+  "duration_s": 91.773,
+  "packet_counter_start": 0,
+  "packet_counter_end": 2954,
+  "sample_time_fine_start": 541559190.0,
+  "sample_time_fine_end": 566174872.0,
+  "generated_utc": "2026-04-29T07:08:17.378680+00:00"
+}

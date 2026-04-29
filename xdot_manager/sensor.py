@@ -474,21 +474,47 @@ class DotSensor:
             return raw[3]  # result = code d'état réel
         return STATE_IDLE
 
-    async def cmd_start_recording(self, recording_time: int = 0xFFFF) -> None:
+    async def cmd_start_recording(
+        self,
+        recording_time: int = 0xFFFF,
+        *,
+        utc_timestamp: int | None = None,
+        wait_ack: bool = True,
+        critical: bool = True,
+    ) -> None:
         """
         Démarre l'enregistrement. Vérifie l'ACK.
         recording_time : durée en secondes (0xFFFF = sans limite de durée).
+        utc_timestamp  : heure de démarrage planifiée (défaut = heure actuelle).
+                        Si fourni, permet un démarrage synchronisé.
+        wait_ack       : si False, n'attend pas l'ACK de confirmation.
+        critical       : si True, utilise le sémaphore critique (sérialisation).
         """
-        logger.info("[%s] START RECORDING (duration=%ss)", self.name,
-                    "illimitée" if recording_time == 0xFFFF else recording_time)
+        logger.info("[%s] START RECORDING (duration=%ss%s)", self.name,
+                    "illimitée" if recording_time == 0xFFFF else recording_time,
+                    f" utc={utc_timestamp}" if utc_timestamp is not None else "")
+
+        # Mode rapide : on pousse d'abord la commande sans attendre l'ACK,
+        # afin de réduire le décalage perçu sur les LED entre capteurs.
+        # La validation est alors faite côté orchestration par lecture d'état.
+        if not wait_ack:
+            await self.write_command(
+                start_recording(recording_time=recording_time, utc=utc_timestamp),
+                response=False,
+                critical=critical,
+            )
+            self.state = DotState.RECORDING
+            return
+
         # Le registre ACK BlueZ peut être périmé juste après une sync ou une
         # lecture d'état. On attend un court instant et on augmente les essais
         # pour favoriser la stabilité plutôt que la latence.
         await self.send_and_ack(
-            start_recording(recording_time=recording_time),
+            start_recording(recording_time=recording_time, utc=utc_timestamp),
             retries=12,
             retry_delay=0.10,
             pre_delay=0.15,
+            critical=critical,
         )
         self.state = DotState.RECORDING
 

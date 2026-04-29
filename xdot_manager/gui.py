@@ -634,7 +634,16 @@ class MainWindow(QMainWindow):
             self._refresh_buttons()
 
     def _on_sensor_disconnected(self, sensor: DotSensor) -> None:
-        """Déclenché par callback en asynchrone lors d'une chute inattendue."""
+        """Déclenché par callback en asynchrone lors d'une chute inattendue.
+        
+        Stratégie de reconnexion automatique:
+        - Détecte les déconnexions BLE pendant l'acquisition (pas en recording)
+        - Tente 3 reconnexions avec délais progressifs (2s, 4s, 8s)
+        - Récupère l'état du capteur pour valider la connexion
+        - Si échec définitif, retire le capteur de la liste active
+        - Remarque: La reconnexion automatique n'opère PAS pendant l'enregistrement
+          (risque de corruption de données)
+        """
         if sensor not in self._sensors or self._recording:
             return  # Déconnecté volontairement ou en cours de record (géré ailleurs)
 
@@ -643,26 +652,37 @@ class MainWindow(QMainWindow):
         self._log(f"<span style='color:#f1c40f'>⚠ <b>{sensor.address}</b> connexion perdue, tentative automatique...</span>")
 
         async def _reconnect():
-            try:
-                await asyncio.sleep(2.0) # Petit délai de stabilisation
-                await sensor.connect()
-                
+            # Retries avec délais exponentiels: 2s, 4s, 8s
+            retries = 3
+            for retry_idx in range(1, retries + 1):
                 try:
-                    st = await sensor.cmd_get_state()
-                    self._set_row_state(sensor.address, STATE_NAMES.get(st, f"0x{st:02x}"))
-                except Exception:
-                    self._set_row_state(sensor.address, "Idle")
+                    delay_s = 2.0 * (2 ** (retry_idx - 1))  # 2, 4, 8 secondes
+                    await asyncio.sleep(delay_s)
+                    
+                    await sensor.connect()
+                    
+                    try:
+                        st = await sensor.cmd_get_state()
+                        self._set_row_state(sensor.address, STATE_NAMES.get(st, f"0x{st:02x}"))
+                    except Exception:
+                        self._set_row_state(sensor.address, "Idle")
 
-                self._mark_health_reconnect(sensor.address)
-                self._log(f"<span style='color:#a6e3a1'>✔ <b>{sensor.address}</b> reconnecté automatiquement.</span>")
-                self._refresh_adapter_indicator()
-                self._refresh_buttons()
-            except Exception as exc:
-                self._mark_health_reconnect_fail(sensor.address)
-                self._set_row_state(sensor.address, "ERREUR")
-                self._log(f"<span style='color:#f38ba8'>✖ Échec reconnexion de {sensor.address} : {exc}</span>")
-                # On purge la connexion
-                self._purge_disconnected()
+                    self._mark_health_reconnect(sensor.address)
+                    self._log(f"<span style='color:#a6e3a1'>✔ <b>{sensor.address}</b> reconnecté (tentative {retry_idx}/{retries}).</span>")
+                    self._refresh_adapter_indicator()
+                    self._refresh_buttons()
+                    return  # Succès, exit
+                    
+                except Exception as exc:
+                    if retry_idx < retries:
+                        self._log(f"<span style='color:#f1c40f'>⚠ Tentative {retry_idx}/{retries} échouée pour {sensor.address}: {exc}</span>")
+                    else:
+                        # Dernier essai échoué
+                        self._mark_health_reconnect_fail(sensor.address)
+                        self._set_row_state(sensor.address, "ERREUR")
+                        self._log(f"<span style='color:#f38ba8'>✖ Échec reconnexion définitif de {sensor.address} après {retries} tentatives.</span>")
+                        # On purge la connexion
+                        self._purge_disconnected()
         
         asyncio.create_task(_reconnect())
 
@@ -823,11 +843,29 @@ class MainWindow(QMainWindow):
             return
 
         await self._ensure_output_rate(120)
-        self._log("Démarrage de l'enregistrement...")
+        self._log("Démarrage de l'enregistrement synchronisé...")
+        self._log("Vérification synchronisation UTC système...")
         self._set_busy(True)
         try:
-            from .recording import start_all
-            result = await start_all(op_sensors)
+            from .recording import start_all_synchronized
+            from .utc import get_utc_status
+            
+            # === Vérifier UTC avant démarrage ===
+            utc_status = await get_utc_status()
+            if not utc_status.is_synchronized:
+                self._log(
+                    "<span style='color:#f9a825'>⚠️ UTC non synchronisé NTP</span>\n"
+                    "L'enregistrement continue, mais les timestamps absolus peuvent être moins fiables."
+                )
+            elif utc_status.drift_seconds > 1.0:
+                self._log(
+                    f"<span style='color:#f9a825'>⚠️ Attention : Dérive UTC {utc_status.drift_seconds:.2f}s détectée</span>\n"
+                    "Pour enregistrements long, synchronisez NTP d'abord (timedatectl set-ntp true)."
+                )
+            else:
+                self._log(f"✓ UTC OK (drift: {utc_status.drift_seconds:.3f}s)")
+            
+            result = await start_all_synchronized(op_sensors, start_delay_s=2.5)
             self._recording = True
             self._recording_sensors = list(op_sensors)
             self._recording_start = datetime.now()
@@ -836,7 +874,7 @@ class MainWindow(QMainWindow):
                 self._set_row_state(s.address, "Recording")
             jitter_info = ""
             if result.jitter_ms is not None:
-                jitter_info = f" — jitter ACK : <b>{result.jitter_ms:.1f} ms</b>"
+                jitter_info = f" — latence ACK max : <b>{result.jitter_ms:.1f} ms</b>"
             self._log(
                 f"<span style='color:#f38ba8'>⏺ Enregistrement démarré</span>"
                 f" — {len(op_sensors)} capteur(s){jitter_info}"

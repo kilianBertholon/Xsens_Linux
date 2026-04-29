@@ -223,6 +223,66 @@ async def synchronize_sensors(
     return result
 
 
+async def synchronize_sensors_with_retry(
+    sensors: list[DotSensor],
+    root_index: int = 0,
+    settle_time: float = SYNC_SETTLE_TIME,
+    verify_state: bool = True,
+    wait_for_idle: bool = True,
+    idle_poll_interval: float = 0.5,
+    idle_timeout: float = 30.0,
+    progress_callback: Optional[Callable[[str, str], None]] = None,
+    await_sync_ack: bool = False,
+    retries: int = 2,
+    retry_delay: float = 2.0,
+) -> SyncResult:
+    """
+    Synchronise les capteurs avec tentatives supplémentaires si la première
+    passe laisse des capteurs en échec.
+
+    La stratégie est volontairement simple : on relance la sync complète
+    après un court délai, car un échec partiel est souvent transitoire sur BLE.
+    """
+    last_result: SyncResult | None = None
+
+    for attempt in range(1, max(1, retries) + 1):
+        if attempt > 1:
+            logger.info(
+                "Nouvelle tentative de synchronisation %d/%d dans %.1fs...",
+                attempt,
+                retries,
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+
+        last_result = await synchronize_sensors(
+            sensors,
+            root_index=root_index,
+            settle_time=settle_time,
+            verify_state=verify_state,
+            wait_for_idle=wait_for_idle,
+            idle_poll_interval=idle_poll_interval,
+            idle_timeout=idle_timeout,
+            progress_callback=progress_callback,
+            await_sync_ack=await_sync_ack,
+        )
+
+        if last_result.success:
+            if attempt > 1:
+                logger.info("Synchronisation validée après %d tentative(s).", attempt)
+            return last_result
+
+        logger.warning(
+            "Synchronisation incomplète après tentative %d/%d : %s",
+            attempt,
+            retries,
+            last_result.failed_sensors,
+        )
+
+    assert last_result is not None
+    return last_result
+
+
 async def _verify_sync_state(sensor: DotSensor) -> bool:
     """
     Vérifie que le capteur est revenu en état Idle après la sync.
