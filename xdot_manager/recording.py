@@ -21,6 +21,7 @@ from typing import Optional
 from .sensor import DotSensor, DotError, STATE_IDLE, STATE_RECORDING
 from .protocol.gatt import STATE_NAMES
 from .utc import verify_utc_before_recording, get_utc_status
+from .sync import synchronize_sensors
 
 logger = logging.getLogger(__name__)
 
@@ -219,19 +220,26 @@ async def start_all_synchronized(
 ) -> RecordingResult:
     """
     Démarre l'enregistrement sur tous les capteurs de manière synchronisée,
-    en utilisant un StartUTC commun envoyé à tous les capteurs.
+    en utilisant d'abord la synchronisation Root/Slave (§5.2.3) puis un StartUTC
+    commun envoyé à tous les capteurs.
 
-    Stratégie adaptative :
-    1. Calculer un UTC cible dans le futur (start_delay_s secondes)
-    2. Envoyer exactement le même UTC à tous les capteurs avec wait_ack=True
-    3. Mesurer la latence ACK par capteur
-    4. Si max(ACK latencies) dépasse le délai configuré, augmenter le délai et recommencer (une fois)
-    5. Attendre le démarrage planifié et confirmer les états
-    6. Confirmation par lecture d'état après stabilisation
+    Stratégie en deux phases :
+    PHASE 1 : Synchronisation Root/Slave (§5.2.3)
+    1. Sélectionner le capteur Root (le premier par défaut)
+    2. Envoyer start_syncing(root_mac) à TOUS les capteurs
+    3. Attendre SYNC_SETTLE_TIME (2.0s pour la radio)
+    4. Vérifier que les horloges internes sont alignées (tous en STATE_IDLE)
+    
+    PHASE 2 : Démarrage synchronized avec StartUTC (§5.2.2)
+    5. Calculer un UTC cible dans le futur (start_delay_s secondes)
+    6. Envoyer exactement le même UTC à tous les capteurs avec wait_ack=True
+    7. Mesurer la latence ACK par capteur
+    8. Si max(ACK latencies) dépasse le délai configuré, augmenter le délai
+    9. Attendre le démarrage planifié et confirmer les états
 
     Args:
         sensors         : liste des capteurs à synchroniser
-        start_delay_s   : délai d'attente avant démarrage (en secondes)
+        start_delay_s   : délai d'attente avant démarrage (en secondes) APRÈS la sync
 
     Returns:
         RecordingResult avec jitter mesuré lors de l'armement
@@ -251,8 +259,35 @@ async def start_all_synchronized(
                 ", ".join(duplicates),
             )
 
-        # ===== Vérification UTC (robustesse) =====
-        logger.info("Vérification synchronisation UTC système...")
+        t0 = time.monotonic()
+
+        # ===== PHASE 1 : Synchronisation Root/Slave (§5.2.3) =====
+        logger.info("PHASE 1 : Synchronisation Root/Slave des horloges internes...")
+        try:
+            sync_result = await synchronize_sensors(
+                sensors,
+                root_index=0,
+                settle_time=2.0,
+                verify_state=True,
+                wait_for_idle=True,
+                idle_poll_interval=0.5,
+                idle_timeout=30.0,
+                progress_callback=None,
+                await_sync_ack=False,
+            )
+            logger.info("Résultat sync : %s", sync_result)
+            if not sync_result.success:
+                logger.warning(
+                    "⚠️ Synchronisation partiellement échouée : %d/%d capteurs OK. "
+                    "Continuant quand même...",
+                    sync_result.n_ok if hasattr(sync_result, 'n_ok') else len([a for a, ok in sync_result.per_sensor.items() if ok]),
+                    len(sensors),
+                )
+        except Exception as exc:
+            logger.warning("⚠️ Synchronisation échouée : %s. Continuant quand même...", exc)
+
+        # ===== PHASE 2 : Vérification UTC (robustesse) =====
+        logger.info("PHASE 2 : Vérification synchronisation UTC système...")
         utc_status = await get_utc_status()
         logger.info(f"UTC Status: {utc_status}")
         
@@ -270,7 +305,8 @@ async def start_all_synchronized(
         else:
             logger.info(f"✓ UTC OK (drift: {utc_status.drift_seconds:.3f}s)")
 
-        t0 = time.monotonic()
+        # ===== PHASE 3 : Démarrage avec StartUTC commun =====
+        logger.info("PHASE 3 : Démarrage enregistrement avec StartUTC commun...")
 
         # Pré-lecture de l'état avant démarrage
         preflight_states = await asyncio.gather(*[_read_state_or_none(s, critical=False) for s in sensors])
