@@ -652,11 +652,12 @@ class MainWindow(QMainWindow):
         self._log(f"<span style='color:#f1c40f'>⚠ <b>{sensor.address}</b> connexion perdue, tentative automatique...</span>")
 
         async def _reconnect():
-            # Retries avec délais exponentiels: 2s, 4s, 8s
+            # Retries avec délais exponentiels: 1s, 2s, 4s (plus réactif)
             retries = 3
+            delays = [1.0, 2.0, 4.0]  # délais pour tentatives 1, 2, 3
             for retry_idx in range(1, retries + 1):
                 try:
-                    delay_s = 2.0 * (2 ** (retry_idx - 1))  # 2, 4, 8 secondes
+                    delay_s = delays[retry_idx - 1]
                     await asyncio.sleep(delay_s)
                     
                     await sensor.connect()

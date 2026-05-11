@@ -161,7 +161,7 @@ EXPORT_PRESET_FULL = list(EXPORT_DATA_TYPES.keys())
 # ---------------------------------------------------------------------------
 # Timeouts (secondes)
 # ---------------------------------------------------------------------------
-GATT_TIMEOUT         = 10.0   # write / read ACK
+GATT_TIMEOUT         = 5.0    # write / read ACK (optimisé pour réactivité)
 DATA_TIMEOUT         = 15.0   # entre deux paquets 0x71 consécutifs
 CONNECT_TIMEOUT      = 15.0   # tentative de connexion BLE
 SYNC_SETTLE_TIME     = 2.0    # attente après envoi start_syncing

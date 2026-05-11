@@ -21,7 +21,13 @@ from typing import Optional
 from .sensor import DotSensor, DotError, STATE_IDLE, STATE_RECORDING
 from .protocol.gatt import STATE_NAMES
 from .utc import verify_utc_before_recording, get_utc_status
+
 logger = logging.getLogger(__name__)
+
+# Constantes de timing pour état/confirmations (secondes)
+_SLEEP_AFTER_NACK = 0.25      # Délai après détection NACK before retry
+_SLEEP_AFTER_START = 0.15     # Délai post start_recording pour confirmer l'état
+_SLEEP_AFTER_STOP = 0.35      # Délai post stop_recording pour confirmer l'état
 
 # Sûreté : éviter les commandes concurrentes ou redondantes quand l'UI est très
 # sollicitée / quand beaucoup de capteurs sont connectés.
@@ -138,16 +144,17 @@ async def _record_one(
             except DotError as exc:
                 # Si l'ACK est périmé mais que l'état réel a basculé en
                 # enregistrement, on préfère considérer l'opération comme réussie.
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(_SLEEP_AFTER_NACK)
                 confirmed_state = await _read_state_or_none(sensor)
                 if confirmed_state == STATE_RECORDING:
                     timestamps.append(time.monotonic())
                     if stale_ack_accepted is not None:
                         stale_ack_accepted[sensor.address] = stale_ack_accepted.get(sensor.address, 0) + 1
+                    logger.debug("[%s] ACK stale mais state=RECORDING confirmé", sensor.name)
                     return True, ""
                 raise exc
 
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(_SLEEP_AFTER_START)
             confirmed_state = await _read_state_or_none(sensor)
             if confirmed_state is None:
                 timestamps.append(time.monotonic())
@@ -169,12 +176,13 @@ async def _record_one(
             try:
                 await sensor.cmd_stop_recording()
             except DotError:
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(_SLEEP_AFTER_STOP)
                 confirmed_state = await _read_state_or_none(sensor)
                 if confirmed_state == STATE_IDLE:
                     timestamps.append(time.monotonic())
                     if stale_ack_accepted is not None:
                         stale_ack_accepted[sensor.address] = stale_ack_accepted.get(sensor.address, 0) + 1
+                    logger.debug("[%s] ACK stale mais state=IDLE confirmé", sensor.name)
                     return True, ""
                 raise
         timestamps.append(time.monotonic())
